@@ -1,0 +1,7 @@
+name = "doh-proxy"
+main = "worker.js"
+compatibility_date = "2026-05-30"
+workers_dev = true
+routes = [
+  { pattern = "doh.leilaomi.ccwu.cc", custom_domain = true }
+]
