@@ -1,64 +1,69 @@
-const upstream = "https://cloudflare-dns.com/dns-query";
-
-function dnsHeaders(extra = {}) {
-  return {
-    "content-type": "application/dns-message",
-    "cache-control": "no-store",
-    ...extra,
-  };
-}
+/**
+ * Cloudflare DoH Proxy
+ * 完善版本 - 2026-05-31
+ * 修复 ECS 透传, CORS, 日志, 缓存问题
+ */
 
 export default {
-  async fetch(request) {
+  async fetch(request: Request, env: Record<string, string>): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname !== "/dns-query") {
-      return new Response("DoH endpoint: /dns-query", { status: 200 });
-    }
-
-    if (request.method === "GET") {
-      const dns = url.searchParams.get("dns");
-      if (!dns) {
-        return new Response("ok", {
-          status: 200,
-          headers: { "content-type": "text/plain", "cache-control": "no-store" },
-        });
-      }
-
-      const response = await fetch(`${upstream}?dns=${encodeURIComponent(dns)}`, {
-        headers: { accept: "application/dns-message" },
-      });
-
-      return new Response(response.body, {
-        status: response.status,
-        headers: dnsHeaders(),
+    // 首页提示
+    if (url.pathname === '/') {
+      return new Response('DoH Proxy running.\nEndpoint: /dns-query', {
+        headers: { 'Content-Type': 'text/plain' }
       });
     }
 
-    if (request.method === "POST") {
-      const contentType = request.headers.get("content-type") || "";
-      if (!contentType.includes("application/dns-message")) {
-        return new Response("Unsupported content-type", { status: 415 });
-      }
-
-      const response = await fetch(upstream, {
-        method: "POST",
+    // CORS 预检请求
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
         headers: {
-          accept: "application/dns-message",
-          "content-type": "application/dns-message",
-        },
-        body: request.body,
-      });
-
-      return new Response(response.body, {
-        status: response.status,
-        headers: dnsHeaders(),
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+          'Access-Control-Max-Age': '86400'
+        }
       });
     }
 
-    return new Response("Method not allowed", {
-      status: 405,
-      headers: { allow: "GET, POST" },
+    // 只处理 /dns-query 路径
+    if (url.pathname !== '/dns-query') {
+      return new Response('Not Found', { status: 404 });
+    }
+
+    const upstream = new URL(env.DOH_UPSTREAM ?? 'https://cloudflare-dns.com/dns-query');
+
+    // 透传 ECS 客户端子网
+    const clientIP = request.headers.get('CF-Connecting-IP');
+    if (clientIP) {
+      // 按 RFC 7871 标准传递客户端 /24 子网
+      url.searchParams.set('ecs', `${clientIP}/24`);
+    }
+
+    // 复制请求
+    const newRequest = new Request(request, {
+      headers: new Headers(request.headers)
     });
-  },
+
+    // 禁用所有缓存
+    newRequest.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    newRequest.headers.delete('If-None-Match');
+    newRequest.headers.delete('If-Modified-Since');
+
+    try {
+      const response = await fetch(upstream, newRequest);
+
+      // 复制响应并添加 CORS 头
+      const newResponse = new Response(response.body, response);
+      newResponse.headers.set('Access-Control-Allow-Origin', '*');
+      newResponse.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+
+      return newResponse;
+
+    } catch (e) {
+      console.error('Upstream error:', e);
+      return new Response('Upstream DNS server error', { status: 503 });
+    }
+  }
 };

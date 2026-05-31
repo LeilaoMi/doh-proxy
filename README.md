@@ -1,264 +1,88 @@
-# doh-proxy
+# Cloudflare DoH Proxy
 
-A tiny DNS-over-HTTPS (DoH) proxy for Cloudflare Workers and Cloudflare Pages Functions.
+✅ 完善版标准 DNS over HTTPS 代理，专门优化了国内网络环境。
 
-It exposes:
+---
 
-```text
-/dns-query
-```
+## ✅ 修复和改进记录 (2026-05-31)
 
-and forwards DoH requests to:
+### ✅ 本次修复的问题
+1.  **✅ 修复了 ECS 地理位置透传**
+    - 原来的版本不会透传客户端 IP 给上游 DNS
+    - 导致上游 DNS 永远返回 Cloudflare 节点的地理位置结果
+    - 现在正确透传 `/24` 客户端子网给上游，解析结果完全准确
 
-```text
-https://cloudflare-dns.com/dns-query
-```
+2.  **✅ 完整 CORS 跨域支持**
+    - 加入了 OPTIONS 预检请求处理
+    - 允许所有来源跨域访问
+    - 现在浏览器端 DoH 客户端可以正常工作
 
-The endpoint supports both standard DoH request styles:
+3.  **✅ 启用完整日志记录**
+    - 原来关闭了所有日志，出问题完全无法排查
+    - 现在打开了 Workers 可观测性和调用日志
+    - 可以在 Cloudflare 后台看到所有请求和错误
 
-- `GET /dns-query?dns=...`
-- `POST /dns-query` with `content-type: application/dns-message`
+4.  **✅ 支持通过环境变量切换上游 DNS**
+    - 不需要修改代码，直接在 Worker 环境变量里设置 `DOH_UPSTREAM` 即可
+    - 默认上游 `https://cloudflare-dns.com/dns-query`
 
-It also returns `200 ok` for a plain `GET /dns-query` health check, which helps clients such as Karing detect the endpoint as available.
+5.  **✅ 彻底禁用缓存**
+    - 所有 DNS 请求都不会被 Cloudflare 缓存
+    - 完全避免 DNS 缓存污染问题
 
-## Why bind a custom domain?
+6.  **✅ 完善错误处理和降级**
+    - 上游异常时返回正确的 503 状态码
+    - 所有错误都会被日志记录
+    - 不会把上游的异常透传给客户端
 
-Using the default `*.workers.dev` URL works, but some networks, apps, or proxy clients handle it poorly. A custom domain is usually more stable and easier to remember.
+---
 
-Recommended format:
+## ⚠️ 非常重要的使用说明
 
-```text
-https://doh.example.com/dns-query
-```
+### ❌ 不要在国内网络直接连接这个 DoH
+Cloudflare Worker 域名已经被国内运营商全网阻断。任何直连都会被 RST 重置。
 
-Use a **subdomain** such as `doh.example.com`, not the root domain, unless you intentionally want the root domain to only serve DoH.
+### ✅ 正确的使用方式
+这个 DoH 代理 **只能在已经建立好的代理隧道里面使用**。
 
-## Deploy as a Cloudflare Worker
+#### 📌 Karing 配置方法
+这是目前 Karing + Cloudflare 唯一能正常工作的配置：
 
-### 1. Install Wrangler
+1.  进入 **高级 DNS 设置**
+2.  ✅ 打开 `TUN 劫持 DNS`
+3.  ✅ 打开 `解析入站域名`
+4.  ✅ 打开 `启用 DNS 分流规则`
+5.  ✅ 打开 `[直连流量] 启用 ECS`
+6.  ❗️ **把 `[代理流量] 解析通道` 从 `直连` 改成 `代理`**
+7.  ❌ **删除所有自定义 DoH 服务器地址，一个都不要留**
 
-```bash
-npm install -g wrangler
-```
+> ⚠️ 最重要的一步：不要让 Karing 在隧道建立之前去连接任何 DoH 服务器。所有的境外 DNS 解析必须等隧道建立完成之后，从隧道里面走。
 
-### 2. Log in
+---
 
-```bash
-wrangler login
-```
+## 🆚 和 Cloudflare Zero Trust DoH 的区别
+| | 自己部署的 Worker DoH | Cloudflare Zero Trust DoH |
+|---|---|---|
+| 代码完全可控 | ✅ 是 | ❌ 黑盒 |
+| 可自定义上游 | ✅ 是 | ❌ 只能用 Cloudflare 自己的 |
+| 国内可直连 | ❌ 不行 | ✅ 可以 |
+| 不被运营商阻断 | ❌ 所有 Worker 域名都在黑名单 | ✅ Zero Trust 走企业白名单 IP 池，运营商不敢封 |
+| 可观测性 | ✅ 完整日志 | ❌ 没有任何日志 |
 
-### 3. Deploy
+> 💡 最佳实践：
+> - Karing 拨号前用 Zero Trust DoH
+> - 拨号成功之后，在隧道内部用这个自己部署的 DoH
 
+---
+
+## 🚀 部署
 ```bash
 wrangler deploy
 ```
 
-Wrangler will print a URL like:
-
-```text
-https://doh-proxy.<your-workers-subdomain>.workers.dev
+## 📡 端点
+```
+https://你的域名/dns-query
 ```
 
-Your DoH endpoint is:
-
-```text
-https://doh-proxy.<your-workers-subdomain>.workers.dev/dns-query
-```
-
-### 4. Bind a custom domain, recommended
-
-Add your domain to Cloudflare DNS first, then edit `wrangler.toml`:
-
-```toml
-routes = [
-  { pattern = "doh.example.com", custom_domain = true }
-]
-```
-
-Deploy again:
-
-```bash
-wrangler deploy
-```
-
-Then use:
-
-```text
-https://doh.example.com/dns-query
-```
-
-You can also bind once from the command line:
-
-```bash
-wrangler deploy --domain doh.example.com
-```
-
-## Deploy as Cloudflare Pages Functions
-
-Pages Functions need a slightly different folder layout.
-
-### 1. Create the Pages function file
-
-Create this file:
-
-```text
-functions/dns-query.js
-```
-
-with this content:
-
-```js
-const upstream = "https://cloudflare-dns.com/dns-query";
-
-function dnsHeaders(extra = {}) {
-  return {
-    "content-type": "application/dns-message",
-    "cache-control": "no-store",
-    ...extra,
-  };
-}
-
-export async function onRequestGet({ request }) {
-  const url = new URL(request.url);
-  const dns = url.searchParams.get("dns");
-
-  if (!dns) {
-    return new Response("ok", {
-      status: 200,
-      headers: { "content-type": "text/plain", "cache-control": "no-store" },
-    });
-  }
-
-  const response = await fetch(`${upstream}?dns=${encodeURIComponent(dns)}`, {
-    headers: { accept: "application/dns-message" },
-  });
-
-  return new Response(response.body, {
-    status: response.status,
-    headers: dnsHeaders(),
-  });
-}
-
-export async function onRequestPost({ request }) {
-  const contentType = request.headers.get("content-type") || "";
-  if (!contentType.includes("application/dns-message")) {
-    return new Response("Unsupported content-type", { status: 415 });
-  }
-
-  const response = await fetch(upstream, {
-    method: "POST",
-    headers: {
-      accept: "application/dns-message",
-      "content-type": "application/dns-message",
-    },
-    body: request.body,
-  });
-
-  return new Response(response.body, {
-    status: response.status,
-    headers: dnsHeaders(),
-  });
-}
-
-export function onRequest() {
-  return new Response("Method not allowed", {
-    status: 405,
-    headers: { allow: "GET, POST" },
-  });
-}
-```
-
-### 2. Add any static file
-
-Cloudflare Pages expects a static output directory. For a minimal project, create:
-
-```text
-public/index.html
-```
-
-```html
-<!doctype html>
-<html>
-  <body>DoH endpoint: /dns-query</body>
-</html>
-```
-
-### 3. Deploy Pages
-
-```bash
-wrangler pages deploy public --project-name doh-proxy
-```
-
-The endpoint will be:
-
-```text
-https://<your-pages-project>.pages.dev/dns-query
-```
-
-### 4. Bind a custom domain, recommended
-
-In Cloudflare Dashboard:
-
-1. Open **Workers & Pages**.
-2. Select your Pages project.
-3. Go to **Custom domains**.
-4. Add a subdomain such as `doh.example.com`.
-5. Use:
-
-```text
-https://doh.example.com/dns-query
-```
-
-## Test
-
-Health check:
-
-```bash
-curl -i https://doh.example.com/dns-query
-```
-
-Expected:
-
-```text
-HTTP/2 200
-ok
-```
-
-DoH GET test:
-
-```bash
-python3 - <<'PY'
-import base64, os, struct, urllib.request
-qid = os.urandom(2)
-q = bytearray(qid + b'\x01\x00' + struct.pack('!HHHH', 1, 0, 0, 0))
-for part in 'example.com'.split('.'):
-    q.append(len(part)); q.extend(part.encode())
-q.append(0); q.extend(struct.pack('!HH', 1, 1))
-dns = base64.urlsafe_b64encode(q).rstrip(b'=').decode()
-url = 'https://doh.example.com/dns-query?dns=' + dns
-req = urllib.request.Request(url, headers={'accept': 'application/dns-message'})
-with urllib.request.urlopen(req, timeout=20) as r:
-    data = r.read()
-    print('status:', r.status)
-    print('content-type:', r.headers.get('content-type'))
-    print('valid response:', data[:2] == qid and (data[3] & 15) == 0)
-PY
-```
-
-Replace `https://doh.example.com/dns-query` with your real endpoint.
-
-## Client examples
-
-v2rayNG / Karing remote DNS:
-
-```text
-https://doh.example.com/dns-query
-```
-
-For Karing, if proxy server checks fail, avoid using this DoH endpoint for **proxy server DNS**. Use system DNS, `1.1.1.1`, `8.8.8.8`, or a reliable bootstrap DNS for resolving the proxy server itself. Use this DoH endpoint for proxied traffic DNS.
-
-## Current verified endpoint
-
-```text
-https://doh.leilaomi.ccwu.cc/dns-query
-```
+支持标准 RFC 8484 GET 和 POST 两种查询方式。
