@@ -1,88 +1,257 @@
 # Cloudflare DoH Proxy
 
-✅ 完善版标准 DNS over HTTPS 代理，专门优化了国内网络环境。
+一个极简、稳定、适合 v2rayNG / Karing 使用的 DNS over HTTPS（DoH）代理。
+
+当前已验证端点：
+
+```text
+https://doh.leilaomi.ccwu.cc/dns-query
+```
+
+## 功能
+
+- 支持标准 RFC 8484 DoH：
+  - `GET /dns-query?dns=...`
+  - `POST /dns-query`，请求头 `content-type: application/dns-message`
+- `GET /dns-query` 空访问返回 `200 ok`，兼容 Karing 这类客户端的可用性检测。
+- 支持 CORS 和 `OPTIONS` 预检请求。
+- 支持通过环境变量切换上游 DoH。
+- 禁用响应缓存，避免 DNS 缓存污染。
+- 同时提供 Workers 和 Pages Functions 两种部署方式。
+- 提供测试脚本：健康检查、OPTIONS、RFC8484 GET、RFC8484 POST。
+
+默认上游：
+
+```text
+https://cloudflare-dns.com/dns-query
+```
+
+可选环境变量：
+
+```text
+DOH_UPSTREAM=https://dns.google/dns-query
+```
+
+也兼容：
+
+```text
+DOH=dns.google
+```
+
+## 为什么建议绑定自定义子域名？
+
+`*.workers.dev` / `*.pages.dev` 在部分网络或客户端里可能不稳定。建议绑定自己的子域名，例如：
+
+```text
+https://doh.example.com/dns-query
+```
+
+不要默认绑定根域名，除非你明确只想让根域名服务 DoH。
 
 ---
 
-## ✅ 修复和改进记录 (2026-05-31)
+## Workers 部署教程
 
-### ✅ 本次修复的问题
-1.  **✅ 修复了 ECS 地理位置透传**
-    - 原来的版本不会透传客户端 IP 给上游 DNS
-    - 导致上游 DNS 永远返回 Cloudflare 节点的地理位置结果
-    - 现在正确透传 `/24` 客户端子网给上游，解析结果完全准确
+### 1. 安装 Wrangler
 
-2.  **✅ 完整 CORS 跨域支持**
-    - 加入了 OPTIONS 预检请求处理
-    - 允许所有来源跨域访问
-    - 现在浏览器端 DoH 客户端可以正常工作
+```bash
+npm install -g wrangler
+```
 
-3.  **✅ 启用完整日志记录**
-    - 原来关闭了所有日志，出问题完全无法排查
-    - 现在打开了 Workers 可观测性和调用日志
-    - 可以在 Cloudflare 后台看到所有请求和错误
+### 2. 登录 Cloudflare
 
-4.  **✅ 支持通过环境变量切换上游 DNS**
-    - 不需要修改代码，直接在 Worker 环境变量里设置 `DOH_UPSTREAM` 即可
-    - 默认上游 `https://cloudflare-dns.com/dns-query`
+```bash
+wrangler login
+```
 
-5.  **✅ 彻底禁用缓存**
-    - 所有 DNS 请求都不会被 Cloudflare 缓存
-    - 完全避免 DNS 缓存污染问题
+### 3. 配置 `wrangler.toml`
 
-6.  **✅ 完善错误处理和降级**
-    - 上游异常时返回正确的 503 状态码
-    - 所有错误都会被日志记录
-    - 不会把上游的异常透传给客户端
+最小配置：
 
----
+```toml
+name = "doh-proxy"
+main = "worker.js"
+compatibility_date = "2026-05-30"
+workers_dev = true
+```
 
-## ⚠️ 非常重要的使用说明
+推荐绑定自定义子域名：
 
-### ❌ 不要在国内网络直接连接这个 DoH
-Cloudflare Worker 域名已经被国内运营商全网阻断。任何直连都会被 RST 重置。
+```toml
+name = "doh-proxy"
+main = "worker.js"
+compatibility_date = "2026-05-30"
+workers_dev = true
+routes = [
+  { pattern = "doh.example.com", custom_domain = true }
+]
+```
 
-### ✅ 正确的使用方式
-这个 DoH 代理 **只能在已经建立好的代理隧道里面使用**。
+### 4. 可选：配置上游 DoH
 
-#### 📌 Karing 配置方法
-这是目前 Karing + Cloudflare 唯一能正常工作的配置：
+在 Cloudflare Worker 的环境变量里添加：
 
-1.  进入 **高级 DNS 设置**
-2.  ✅ 打开 `TUN 劫持 DNS`
-3.  ✅ 打开 `解析入站域名`
-4.  ✅ 打开 `启用 DNS 分流规则`
-5.  ✅ 打开 `[直连流量] 启用 ECS`
-6.  ❗️ **把 `[代理流量] 解析通道` 从 `直连` 改成 `代理`**
-7.  ❌ **删除所有自定义 DoH 服务器地址，一个都不要留**
+```text
+DOH_UPSTREAM=https://dns.google/dns-query
+```
 
-> ⚠️ 最重要的一步：不要让 Karing 在隧道建立之前去连接任何 DoH 服务器。所有的境外 DNS 解析必须等隧道建立完成之后，从隧道里面走。
+如果不设置，默认使用：
 
----
+```text
+https://cloudflare-dns.com/dns-query
+```
 
-## 🆚 和 Cloudflare Zero Trust DoH 的区别
-| | 自己部署的 Worker DoH | Cloudflare Zero Trust DoH |
-|---|---|---|
-| 代码完全可控 | ✅ 是 | ❌ 黑盒 |
-| 可自定义上游 | ✅ 是 | ❌ 只能用 Cloudflare 自己的 |
-| 国内可直连 | ❌ 不行 | ✅ 可以 |
-| 不被运营商阻断 | ❌ 所有 Worker 域名都在黑名单 | ✅ Zero Trust 走企业白名单 IP 池，运营商不敢封 |
-| 可观测性 | ✅ 完整日志 | ❌ 没有任何日志 |
+### 5. 部署
 
-> 💡 最佳实践：
-> - Karing 拨号前用 Zero Trust DoH
-> - 拨号成功之后，在隧道内部用这个自己部署的 DoH
-
----
-
-## 🚀 部署
 ```bash
 wrangler deploy
 ```
 
-## 📡 端点
-```
-https://你的域名/dns-query
+部署后端点为：
+
+```text
+https://doh-proxy.<你的 workers.dev 子域>.workers.dev/dns-query
 ```
 
-支持标准 RFC 8484 GET 和 POST 两种查询方式。
+如果绑定了自定义域名，则使用：
+
+```text
+https://doh.example.com/dns-query
+```
+
+也可以直接用命令绑定一次自定义域名：
+
+```bash
+wrangler deploy --domain doh.example.com
+```
+
+---
+
+## Pages Functions 部署教程
+
+本项目已包含 Pages Functions 文件：
+
+```text
+functions/dns-query.js
+```
+
+以及最小静态页面：
+
+```text
+public/index.html
+```
+
+### 1. 使用 Wrangler 部署 Pages
+
+```bash
+wrangler pages deploy public --project-name doh-proxy
+```
+
+部署后端点为：
+
+```text
+https://<你的 Pages 项目>.pages.dev/dns-query
+```
+
+### 2. 可选：配置上游 DoH
+
+在 Cloudflare Pages 项目的环境变量里添加：
+
+```text
+DOH_UPSTREAM=https://dns.google/dns-query
+```
+
+不设置则默认使用：
+
+```text
+https://cloudflare-dns.com/dns-query
+```
+
+### 3. 推荐绑定自定义子域名
+
+在 Cloudflare Dashboard：
+
+1. 打开 **Workers & Pages**。
+2. 选择你的 Pages 项目。
+3. 进入 **Custom domains**。
+4. 添加子域名，例如：
+
+```text
+doh.example.com
+```
+
+最终 DoH 地址：
+
+```text
+https://doh.example.com/dns-query
+```
+
+---
+
+## 测试
+
+运行内置测试脚本：
+
+```bash
+node scripts/test-doh.js https://doh.example.com/dns-query example.com
+```
+
+预期：`health`、`OPTIONS`、`RFC8484 GET`、`RFC8484 POST` 都显示 ✅。
+
+手动健康检查：
+
+```bash
+curl -i https://doh.example.com/dns-query
+```
+
+预期：
+
+```text
+HTTP/2 200
+ok
+```
+
+手动 CORS / OPTIONS 检查：
+
+```bash
+curl -i -X OPTIONS https://doh.example.com/dns-query
+```
+
+预期：`204`，并包含：
+
+```text
+access-control-allow-origin: *
+access-control-allow-methods: GET, POST, OPTIONS
+```
+
+---
+
+## v2rayNG / Karing 使用建议
+
+远程 DNS / 代理流量 DNS 可填：
+
+```text
+https://doh.example.com/dns-query
+```
+
+Karing 如果出现“检查代理服务器失败”，不要把这个 DoH 用作 **代理服务器 DNS**。代理服务器 DNS 用系统 DNS、`1.1.1.1`、`8.8.8.8` 或 Cloudflare Zero Trust DoH；这个自建 DoH 更适合放在 **代理流量 DNS** 里。
+
+## 和 Cloudflare Zero Trust DoH 的区别
+
+| 项目 | 自建 Worker/Pages DoH | Cloudflare Zero Trust DoH |
+|---|---|---|
+| 代码可控 | ✅ | ❌ |
+| 可换上游 | ✅ | ❌ |
+| 适合代理后使用 | ✅ | ✅ |
+| 适合代理前启动解析 | ⚠️ 取决于本地网络 | ✅ 通常更稳 |
+| 推荐用途 | 代理流量 DNS | 代理服务器 DNS / 启动前解析 |
+
+## 从 `cmliu/CF-Workers-DoH` 吸收的点
+
+本项目没有照搬完整功能，而是只吸收对 v2rayNG / Karing 有用、且不会明显增加维护成本的部分：
+
+- CORS / OPTIONS 兼容。
+- 环境变量切换上游 DoH。
+- 测试脚本。
+
+没有加入 `/ip-info`、主页伪装、跳转、TOKEN 路径、JSON 查询页面等功能，因为这些对代理客户端 DoH 使用不是必需项，复杂度和公开服务风险更高。
