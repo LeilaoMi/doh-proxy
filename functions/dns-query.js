@@ -70,7 +70,7 @@ export async function onRequestPost({ request, env }) {
         "content-type": "application/dns-message",
         "cache-control": "no-store",
       },
-      body: request.body,
+      body: await request.arrayBuffer(),
     });
 
     return new Response(response.body, { status: response.status, headers: dnsHeaders() });

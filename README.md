@@ -14,6 +14,7 @@ https://doh.leilaomi.ccwu.cc/dns-query
   - `GET /dns-query?dns=...`
   - `POST /dns-query`，请求头 `content-type: application/dns-message`
 - `GET /dns-query` 空访问返回 `200 ok`，兼容 Karing 这类客户端的可用性检测。
+- `GET /health` 返回 JSON 健康状态，方便监控和排障。
 - 支持 CORS 和 `OPTIONS` 预检请求。
 - 支持通过环境变量切换上游 DoH。
 - 禁用响应缓存，避免 DNS 缓存污染。
@@ -202,6 +203,7 @@ node scripts/test-doh.js https://doh.example.com/dns-query example.com
 
 ```bash
 curl -i https://doh.example.com/dns-query
+curl -i https://doh.example.com/health
 ```
 
 预期：
@@ -209,6 +211,12 @@ curl -i https://doh.example.com/dns-query
 ```text
 HTTP/2 200
 ok
+```
+
+`/health` 预期返回：
+
+```json
+{"status":"ok","service":"doh-proxy","endpoint":"/dns-query"}
 ```
 
 手动 CORS / OPTIONS 检查：
@@ -234,7 +242,16 @@ access-control-allow-methods: GET, POST, OPTIONS
 https://doh.example.com/dns-query
 ```
 
-Karing 如果出现“检查代理服务器失败”，不要把这个 DoH 用作 **代理服务器 DNS**。代理服务器 DNS 用系统 DNS、`1.1.1.1`、`8.8.8.8` 或 Cloudflare Zero Trust DoH；这个自建 DoH 更适合放在 **代理流量 DNS** 里。
+Karing 如果出现“检查代理服务器失败”，通常不是本 DoH 协议不可用，而是它被放到了启动阶段 DNS 位置。不要把这个 DoH 用作 **代理服务器 DNS / 节点服务器 DNS / 启动前解析 DNS**。
+
+推荐分工：
+
+```text
+代理服务器 DNS / 启动 DNS：system、1.1.1.1、8.8.8.8、223.5.5.5、119.29.29.29
+远程 DNS / 代理流量 DNS：https://doh.example.com/dns-query
+```
+
+原因：代理尚未建立前，客户端需要先解析服务器域名。如果这一步依赖自建 Worker DoH，而当前网络又无法稳定直连该 DoH 域名，就可能导致连接检查失败。这个自建 DoH 更适合放在 **代理建立之后使用的 DNS** 位置。
 
 ## 和 Cloudflare Zero Trust DoH 的区别
 

@@ -2,6 +2,7 @@
 
 const endpoint = (process.argv[2] || "https://doh.leilaomi.ccwu.cc/dns-query").replace(/\/+$/, "");
 const domain = process.argv[3] || "example.com";
+const baseUrl = endpoint.replace(/\/dns-query$/, "");
 
 function base64url(buffer) {
   return Buffer.from(buffer).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -41,9 +42,14 @@ async function main() {
   const { id, query } = createDnsQuery(domain);
   const dns = base64url(query);
   const tests = [
-    timed("health", async () => {
+    timed("dns-query", async () => {
       const response = await fetch(endpoint);
       return { status: response.status, type: response.headers.get("content-type") };
+    }),
+    timed("/health", async () => {
+      const response = await fetch(`${baseUrl}/health`);
+      const body = await response.json();
+      return { status: response.status, type: response.headers.get("content-type"), valid: body.status === "ok" };
     }),
     timed("OPTIONS", async () => {
       const response = await fetch(endpoint, { method: "OPTIONS" });
@@ -63,6 +69,14 @@ async function main() {
       const body = Buffer.from(await response.arrayBuffer());
       return { status: response.status, type: response.headers.get("content-type"), ...parseDnsSummary(body, id) };
     }),
+    timed("bad POST", async () => {
+      const response = await fetch(endpoint, { method: "POST", body: "not dns" });
+      return { status: response.status, type: response.headers.get("content-type"), valid: response.status === 415 };
+    }),
+    timed("bad path", async () => {
+      const response = await fetch(`${baseUrl}/not-found`);
+      return { status: response.status, type: response.headers.get("content-type"), valid: response.status === 404 };
+    }),
   ];
 
   console.log(`Endpoint: ${endpoint}`);
@@ -71,12 +85,12 @@ async function main() {
 
   const results = await Promise.all(tests);
   for (const result of results) {
-    const ok = result.ok && result.status >= 200 && result.status < 300 && (result.valid ?? true);
+    const ok = result.ok && (result.valid === true || (result.status >= 200 && result.status < 300 && result.valid !== false));
     const detail = result.error || `status=${result.status} type=${result.type || ""} answers=${result.answers ?? "-"} rcode=${result.rcode ?? "-"}`;
     console.log(`${ok ? "✅" : "❌"} ${result.name.padEnd(12)} ${result.ms.toFixed(1).padStart(7)}ms  ${detail}`);
   }
 
-  if (results.some((result) => !result.ok || result.status < 200 || result.status >= 300 || result.valid === false)) process.exitCode = 1;
+  if (results.some((result) => !(result.ok && (result.valid === true || (result.status >= 200 && result.status < 300 && result.valid !== false))))) process.exitCode = 1;
 }
 
 main().catch((error) => {

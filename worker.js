@@ -26,6 +26,14 @@ function textHeaders(extra = {}) {
   });
 }
 
+function jsonHeaders(extra = {}) {
+  return corsHeaders({
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+    ...extra,
+  });
+}
+
 function getUpstream(env) {
   const value = (env?.DOH_UPSTREAM || env?.DOH || defaultUpstream).trim().replace(/\/+$/, "");
   if (value.startsWith("http://") || value.startsWith("https://")) {
@@ -46,6 +54,14 @@ export default {
 
     if (url.pathname === "/") {
       return new Response("DoH Proxy running. Endpoint: /dns-query", { status: 200, headers: textHeaders() });
+    }
+
+    if (url.pathname === "/health") {
+      return new Response(JSON.stringify({
+        status: "ok",
+        service: "doh-proxy",
+        endpoint: "/dns-query",
+      }), { status: 200, headers: jsonHeaders() });
     }
 
     if (url.pathname !== "/dns-query") {
@@ -77,7 +93,7 @@ export default {
             "content-type": "application/dns-message",
             "cache-control": "no-store",
           },
-          body: request.body,
+          body: await request.arrayBuffer(),
         });
 
         return new Response(response.body, { status: response.status, headers: dnsHeaders() });
