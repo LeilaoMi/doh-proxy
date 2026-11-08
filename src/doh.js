@@ -5,6 +5,10 @@ const DEFAULT_UPSTREAM = "cloudflare-dns.com";
 const DEFAULT_ECH_SOURCE = "cloudflare-ech.com";
 const DEFAULT_ALPN = "h3,h2";
 const DEFAULT_MAX_IPS = 4;
+// China Mobile throttles overseas UDP heavily, so it gets h2 only by default.
+// Override with ECH_ALPN_BY_ISP, or set it to "off" to disable per-carrier alpn.
+const DEFAULT_ALPN_BY_ISP = "ct:h3,h2;cu:h3,h2;cm:h2";
+const ISPS = new Set(["ct", "cu", "cm"]);
 const REWRITE_TTL = 300;
 
 const TYPE = { A: 1, CNAME: 5, AAAA: 28, OPT: 41, HTTPS: 65 };
@@ -189,8 +193,12 @@ function inCidr6(bytes, cidr) {
 }
 export const isCfV4 = (ip) => CF_V4.some((c) => inCidr4(ip, c));
 export const isCfV6 = (ip) => { const b = v6ToBytes(ip); return CF_V6.some((c) => inCidr6(b, c)); };
-const isV4 = (s) => /^\d{1,3}(\.\d{1,3}){3}$/.test(s);
-const isV6 = (s) => s.includes(":") && /^[0-9a-f:]+$/i.test(s);
+const isV4 = (s) => /^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/.test(String(s));
+const isV6 = (s) => {
+  s = String(s);
+  if (!s.includes(":") || !/^[0-9a-f:]+$/i.test(s)) return false;
+  try { return new URL(`http://[${s}]/`).hostname.length > 2; } catch { return false; }
+};
 const rdataA = (rd) => Array.from(rd).join(".");
 const rdataAAAA = (rd) => bytesToV6(rd);
 
@@ -300,12 +308,20 @@ async function getEchConfig(env, ctx, origin) {
 }
 
 // ---------- preferred IP pool ----------
-async function getPreferredIps(env, opts) {
+async function getPreferredIps(env, opts, need = { v4: true, v6: true }) {
   const max = Math.max(1, Math.min(8, +(env?.MAX_IPS || DEFAULT_MAX_IPS)));
-  // Per-request overrides: ?ip4=a,b&ip6=c
-  let v4 = opts.ip4.length ? opts.ip4 : list(env?.BEST_IPV4);
-  let v6 = opts.ip6.length ? opts.ip6 : list(env?.BEST_IPV6);
-  if (!opts.ip4.length && !v4.length && (env?.BESTIP || env?.BEST_IP_URL)) {
+  // Per address family: ?ip4=/?ip6= > BEST_IPV4_<ISP>/BEST_IPV6_<ISP> (with ?isp=) > BEST_IPV4/BEST_IPV6 > pool.
+  const fixed = (fam, valid) => {
+    const k = `BEST_IP${fam}`;
+    const own = opts.isp ? list(env?.[`${k}_${opts.isp.toUpperCase()}`]).filter(valid) : [];
+    return own.length ? own : list(env?.[k]).filter(valid);
+  };
+  let v4 = opts.ip4.length ? opts.ip4 : fixed("V4", isV4);
+  let v6 = opts.ip6.length ? opts.ip6 : fixed("V6", isV6);
+  // Only wait on the pool for the address families this answer actually needs.
+  const want4 = need.v4 && !v4.length;
+  const want6 = need.v6 && !v6.length;
+  if ((want4 || want6) && (env?.BESTIP || env?.BEST_IP_URL)) {
     const pool = await loadPool(env).catch(() => []);
     const pick = (fam) => {
       let rows = pool.filter((r) => r.family === fam);
@@ -315,8 +331,8 @@ async function getPreferredIps(env, opts) {
       }
       return [...new Set(rows.map((r) => r.ip))].slice(0, max);
     };
-    v4 = pick("v4");
-    if (!v6.length) v6 = pick("v6");
+    if (want4) v4 = pick("v4");
+    if (want6) v6 = pick("v6");
   }
   return { v4: v4.filter(isV4).slice(0, max), v6: v6.filter(isV6).slice(0, max) };
 }
@@ -355,8 +371,9 @@ async function classify(env, ctx, origin, name, ecs) {
 // ECH_ALPN_BY_ISP="ct:h3,h2;cu:h3,h2;cm:h2" -> per-carrier alpn when ?isp= is given.
 // Workers cannot send UDP, so QUIC reachability cannot be probed here; this is a static per-carrier switch.
 function alpnForIsp(env, isp) {
-  if (!isp || !env?.ECH_ALPN_BY_ISP) return null;
-  for (const part of String(env.ECH_ALPN_BY_ISP).split(";")) {
+  const rules = String(env?.ECH_ALPN_BY_ISP ?? DEFAULT_ALPN_BY_ISP).trim();
+  if (!isp || !rules || /^(0|off|false|no)$/i.test(rules)) return null;
+  for (const part of rules.split(";")) {
     const [k, v] = part.split(":");
     if (k && v && k.trim().toLowerCase() === isp) return v;
   }
@@ -384,7 +401,7 @@ async function echResolve(env, ctx, origin, reqMsg, opts, ecs) {
   const info = await classify(env, ctx, origin, q.name, ecs);
   if (!info.cf) return null;
 
-  const pref = await getPreferredIps(env, opts);
+  const pref = await getPreferredIps(env, opts, { v4: q.type !== TYPE.AAAA, v6: q.type !== TYPE.A && !opts.no6 });
   const upstreamIps = async (type) => {
     const msg = parseMessage(await upstreamQuery(env, ctx, origin, q.name, type, ecs));
     return msg.answers.filter((r) => r.type === type).map((r) => (type === TYPE.A ? rdataA(r.rdata) : rdataAAAA(r.rdata)));
@@ -414,7 +431,7 @@ function requestOptions(url) {
   return {
     ip4: list(p.get("ip4")).filter(isV4),
     ip6: list(p.get("ip6")).filter(isV6),
-    isp: (p.get("isp") || "").toLowerCase() || null, // ct / cu / cm
+    isp: ISPS.has((p.get("isp") || "").toLowerCase()) ? p.get("isp").toLowerCase() : null, // ct / cu / cm
     alpn: p.has("alpn") ? list(p.get("alpn")) : null,
     no6: on(p.get("no6")),
   };
