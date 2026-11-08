@@ -306,15 +306,15 @@ async function getEchConfig(env, ctx, origin) {
 // ---------- preferred IP pool ----------
 async function getPreferredIps(env, opts) {
   const max = Math.max(1, Math.min(8, +(env?.MAX_IPS || DEFAULT_MAX_IPS)));
-  // Precedence: ?ip4=/?ip6= > BEST_IPV4_<ISP>/BEST_IPV6_<ISP> (with ?isp=) > BEST_IPV4/BEST_IPV6 > pool.
-  const fixed = (fam) => {
+  // Per address family: ?ip4=/?ip6= > BEST_IPV4_<ISP>/BEST_IPV6_<ISP> (with ?isp=) > BEST_IPV4/BEST_IPV6 > pool.
+  const fixed = (fam, valid) => {
     const k = `BEST_IP${fam}`;
-    const own = opts.isp ? list(env?.[`${k}_${opts.isp.toUpperCase()}`]) : [];
-    return own.length ? own : list(env?.[k]);
+    const own = opts.isp ? list(env?.[`${k}_${opts.isp.toUpperCase()}`]).filter(valid) : [];
+    return own.length ? own : list(env?.[k]).filter(valid);
   };
-  let v4 = opts.ip4.length ? opts.ip4 : fixed("V4");
-  let v6 = opts.ip6.length ? opts.ip6 : fixed("V6");
-  if (!opts.ip4.length && !v4.length && (env?.BESTIP || env?.BEST_IP_URL)) {
+  let v4 = opts.ip4.length ? opts.ip4 : fixed("V4", isV4);
+  let v6 = opts.ip6.length ? opts.ip6 : fixed("V6", isV6);
+  if ((!v4.length || !v6.length) && (env?.BESTIP || env?.BEST_IP_URL)) {
     const pool = await loadPool(env).catch(() => []);
     const pick = (fam) => {
       let rows = pool.filter((r) => r.family === fam);
@@ -324,7 +324,7 @@ async function getPreferredIps(env, opts) {
       }
       return [...new Set(rows.map((r) => r.ip))].slice(0, max);
     };
-    v4 = pick("v4");
+    if (!v4.length) v4 = pick("v4");
     if (!v6.length) v6 = pick("v6");
   }
   return { v4: v4.filter(isV4).slice(0, max), v6: v6.filter(isV6).slice(0, max) };

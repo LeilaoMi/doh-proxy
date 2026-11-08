@@ -10,6 +10,8 @@ keep_vars = true
 
 # 关闭 workers.dev（国内常被 SNI 阻断），只走自定义域名
 workers_dev = false
+# 显式关闭 Version/Preview URL：省略时会保留以前的设置，可能绕过自定义域名上的 WAF/Access
+preview_urls = false
 routes = [
   { pattern = "doh.example.com", custom_domain = true }   # 必改：你的域名
 ]
@@ -21,6 +23,7 @@ simple = { limit = 600, period = 60 }
 
 # 可选：同账号部署了 cf-best-ip 时，用 Service Binding 调用优选池（不走公网）。
 # 没有就删掉这一段和下面的 BEST_IP_URL。
+# keep_vars 会保留线上已有变量：以前部署过 BEST_IP_URL 的，还要到控制台删掉它。
 [[services]]
 binding = "BESTIP"
 service = "cf-best-ip"

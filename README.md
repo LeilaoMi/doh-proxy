@@ -41,7 +41,7 @@ https://doh.example.com/<ECH_PATH>       # 浏览器
 
 4. `wrangler secret put ECH_PATH`，设一个不可猜测的路径（例如 16 位随机串）。
 5. 按需配置优选 IP（不配也能用）。
-6. 浏览器安全 DNS 填 `https://你的域名/<ECH_PATH>?isp=ct|cu|cm`，打开 `https://crypto.cloudflare.com/cdn-cgi/trace` 看到 `sni=encrypted` 即成功。
+6. 浏览器安全 DNS 填 `https://你的域名/<ECH_PATH>?isp=ct`（`ct` 电信，联通换成 `cu`，移动换成 `cm`），打开 `https://crypto.cloudflare.com/cdn-cgi/trace` 看到 `sni=encrypted` 即成功。
 
 变量都在控制台「设置 → 变量和机密」里填。`wrangler.toml` 设了 `keep_vars = true` 且没有 `[vars]`，同步上游、重新部署都不会冲掉你填的值；请不要为个人配置改 `wrangler.toml`，否则同步上游会冲突。
 
@@ -66,7 +66,7 @@ Cloudflare 边缘对所有 CF 站点都接受 ECH，即使站点面板里关了 
 - 只对 **托管在 Cloudflare 上** 的网站有效；Google、YouTube 等原样返回，仍需代理。
 - 直连时目标网站能看到你的真实 IP，也绕不过地区限制。
 - 外层 SNI 固定是 `cloudflare-ech.com`，特征明显，存在被针对的可能。
-- 国内对境外 UDP 443 常有限速，`h3` 不通时浏览器会回退 `h2`；默认对移动（`?isp=cm`）只给 `h2`，其他情况体验差可加 `?alpn=h2` 或把 `ECH_ALPN` 改为 `h2`。
+- 国内对境外 UDP 443 常有限速，`h3` 不通时浏览器会回退 `h2`；默认对移动（`?isp=cm`）只给 `h2`，其他情况体验差可在地址后加 `&alpn=h2`。注意带 `?isp=` 时运营商规则优先于 `ECH_ALPN`：只改 `ECH_ALPN` 不够，需同时设 `ECH_ALPN_BY_ISP=off` 或改对应运营商的规则。
 - 浏览器必须自己用 DoH 查 HTTPS 记录才会用 ECH；只在系统或路由器设 DNS 不生效。
 
 ## 配置（控制台变量；默认值都在代码里，全部可选）
@@ -75,7 +75,7 @@ Cloudflare 边缘对所有 CF 站点都接受 ECH，即使站点面板里关了 
 |---|---|---|
 | `DOH_UPSTREAM` / `DOH` | `cloudflare-dns.com` | 上游 DoH |
 | `ECH_PATH` | 空（关闭） | ECH 端点路径。用 `wrangler secret put ECH_PATH` 设置不可猜测的值，不要写进仓库；泄露后换一个即可 |
-| `ECH_ALPN` | `h3,h2` | 注入的 alpn |
+| `ECH_ALPN` | `h3,h2` | 注入的 alpn；带 `?isp=` 时被 `ECH_ALPN_BY_ISP` 覆盖 |
 | `ECH_ALPN_BY_ISP` | `ct:h3,h2;cu:h3,h2;cm:h2` | 带 `?isp=` 时按运营商覆盖 alpn，设为 `off` 关闭。Worker 发不了 UDP，无法实测 QUIC，所以是静态开关 |
 | `ECH_SOURCE` | `cloudflare-ech.com` | 从哪个域名获取 ECHConfig |
 | `ECH_CONFIG` | 空 | 固定 ECHConfig（base64），设置后不再自动获取 |
@@ -105,7 +105,9 @@ Cloudflare 边缘对所有 CF 站点都接受 ECH，即使站点面板里关了 
 
 `family` 必填（`v4` / `v6`）；`carrier` 可选（`ct` / `cu` / `cm`），带 `?isp=` 时据此筛选，筛不到就用全部；`tested: false` 的条目会被忽略。池结果缓存 10 分钟，请求失败时回退上游 IP。
 
-优先级：`?ip4=` / `?ip6=` > `BEST_IPV4_<运营商>` > `BEST_IPV4` > 优选池 > 上游原 IP。
+优先级（IPv4、IPv6 各自独立判断）：`?ip4=` / `?ip6=` > `BEST_IPV4_<运营商>` > `BEST_IPV4` > 优选池 > 上游原 IP。格式不对的 IP 会被忽略，不会挡住下一级。
+
+因为 `keep_vars = true`，从配置文件删掉某个变量不会清除线上已有的值；不再使用优选池时，请到控制台删除 `BEST_IP_URL`（固定列表同理）。
 
 不建议使用别人的公共优选池：池决定流量去哪个 IP。TLS 证书仍会校验，不会被劫持，但可能被导向慢或不可用的节点，对方也随时可能限制访问。
 
@@ -157,7 +159,7 @@ Service Binding 只能写在配置文件里。复制模板，个人配置不入�
 cp wrangler.prod.example.toml wrangler.prod.toml   # 已 gitignore
 # 必改：routes 里的域名
 # 必改：BEST_IP_URL 的 host 换成 cf-best-ip 的 ALLOWED_HOSTS 里允许的域名
-# 没有 cf-best-ip：删掉 [[services]] 和 BEST_IP_URL
+# 没有 cf-best-ip：删掉 [[services]] 和 BEST_IP_URL；以前部署过的，还要到控制台删掉 BEST_IP_URL
 wrangler deploy -c wrangler.prod.toml
 ```
 
