@@ -28,6 +28,8 @@ ECH_ALPN = "h3,h2"
 ECH_ALPN_BY_ISP = "ct:h3,h2;cu:h3,h2;cm:h2"
 ECH_SOURCE = "cloudflare-ech.com"
 MAX_IPS = "4"
+# 优选池地址；有 BESTIP 绑定时走绑定，但 host 必须是 cf-best-ip 的 ALLOWED_HOSTS
+BEST_IP_URL = "https://bestip.leilaomi.cc.cd/api/ips?limit=60"
 # ECS 仅对支持 ECS 的上游（如 dns.google）有意义；默认上游 1.1.1.1 不使用 ECS
 ECS = "off"
 CACHE = "on"

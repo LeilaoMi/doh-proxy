@@ -324,10 +324,9 @@ async function getPreferredIps(env, opts) {
 async function loadPool(env) {
   const m = memo.get("pool");
   if (m && m.exp > Date.now()) return m.val;
-  const path = "/api/ips?limit=60";
-  const res = env.BESTIP
-    ? await env.BESTIP.fetch(new Request("https://bestip.internal" + path))
-    : await fetch(String(env.BEST_IP_URL));
+  // cf-best-ip checks ALLOWED_HOSTS, so the binding request must carry its real hostname.
+  const poolUrl = String(env.BEST_IP_URL || "https://bestip.internal/api/ips?limit=60");
+  const res = env.BESTIP ? await env.BESTIP.fetch(new Request(poolUrl)) : await fetch(poolUrl);
   if (!res.ok) throw new Error(`pool HTTP ${res.status}`);
   const data = await res.json();
   const val = (data.ips || []).filter((r) => r && r.ip && r.tested !== false);

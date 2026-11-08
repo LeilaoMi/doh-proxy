@@ -63,7 +63,7 @@ Cloudflare 边缘对所有 CF 站点都接受 ECH，即使站点面板里关了 
 | `ECH_FORCE` | 空 | 强制按 CF 处理的域名后缀，逗号分隔（需配合优选 IP） |
 | `ECH_EXCLUDE` | 空 | 永不改写的域名后缀 |
 | `BEST_IPV4` / `BEST_IPV6` | 空 | 固定优选 IP，逗号分隔，优先级高于优选池 |
-| `BEST_IP_URL` | 空 | 没有 `BESTIP` 绑定时，从这个 URL 拉优选池（cf-best-ip `/api/ips` 格式） |
+| `BEST_IP_URL` | 空 | 优选池地址（cf-best-ip `/api/ips` 格式）。有 `BESTIP` 绑定时也用它的 host，需与 cf-best-ip 的 `ALLOWED_HOSTS` 一致 |
 | `MAX_IPS` | `4` | 每个地址族最多返回几个 IP（1–8） |
 | `ECS` | `off` | 开启后把客户端 IP 的 /24（IPv6 /56）写入 EDNS。默认上游 1.1.1.1 不使用 ECS，配合 `dns.google` 才有意义 |
 | `CACHE` | `on` | 按 TTL 缓存上游应答 |
