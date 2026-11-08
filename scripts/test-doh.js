@@ -2,6 +2,7 @@
 
 const endpoint = (process.argv[2] || "https://doh.leilaomi.ccwu.cc/dns-query").replace(/\/+$/, "");
 const domain = process.argv[3] || "example.com";
+// 可选第 3 个参数：用于 ECH 改写测试的 CF 站点，默认 crypto.cloudflare.com
 const baseUrl = endpoint.replace(/\/dns-query$/, "");
 
 function base64url(buffer) {
@@ -72,6 +73,13 @@ async function main() {
     timed("bad POST", async () => {
       const response = await fetch(endpoint, { method: "POST", body: "not dns" });
       return { status: response.status, type: response.headers.get("content-type"), valid: response.status === 415 };
+    }),
+    timed("ECH rewrite", async () => {
+      const echName = process.argv[4] || "crypto.cloudflare.com";
+      const response = await fetch(`${baseUrl}/resolve?name=${echName}&type=HTTPS&mode=ech`);
+      const body = await response.json();
+      const data = body.answers?.[0]?.data || {};
+      return { status: response.status, type: response.headers.get("content-type"), valid: body.rewritten === true && !!data.ech, answers: body.answers?.length ?? 0 };
     }),
     timed("bad path", async () => {
       const response = await fetch(`${baseUrl}/not-found`);

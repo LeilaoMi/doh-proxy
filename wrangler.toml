@@ -1,7 +1,23 @@
 name = "doh-proxy"
 main = "worker.js"
 compatibility_date = "2026-05-30"
-workers_dev = true
+# 线上已关闭 workers.dev（国内 SNI 被封），保持一致，避免部署时被重新打开
+workers_dev = false
 routes = [
   { pattern = "doh.leilaomi.ccwu.cc", custom_domain = true }
 ]
+
+# 优选 IP 池：通过 Service Binding 直接调用同账号的 cf-best-ip Worker（不走公网、不受 Worker 互访限制）
+[[services]]
+binding = "BESTIP"
+service = "cf-best-ip"
+
+[vars]
+# ECH 改写端点路径；建议改成不易猜到的路径，避免被当公共 DoH 滥用
+ECH_PATH = "/ech"
+ECH_ALPN = "h3,h2"
+ECH_SOURCE = "cloudflare-ech.com"
+MAX_IPS = "4"
+# ECS 仅对支持 ECS 的上游（如 dns.google）有意义；默认上游 1.1.1.1 不使用 ECS
+ECS = "off"
+CACHE = "on"
