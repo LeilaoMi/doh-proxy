@@ -2,7 +2,6 @@
 // Shared by worker.js (Workers) and functions/*.js (Pages Functions).
 
 const DEFAULT_UPSTREAM = "cloudflare-dns.com";
-const DEFAULT_ECH_PATH = "/ech";
 const DEFAULT_ECH_SOURCE = "cloudflare-ech.com";
 const DEFAULT_ALPN = "h3,h2";
 const DEFAULT_MAX_IPS = 4;
@@ -45,7 +44,11 @@ export function getUpstream(env) {
 }
 const on = (v) => /^(1|on|true|yes)$/i.test(String(v ?? "").trim());
 const list = (v) => String(v ?? "").split(/[\s,]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
-const echPath = (env) => "/" + String(env?.ECH_PATH || DEFAULT_ECH_PATH).replace(/^\/+/, "").replace(/\/+$/, "");
+// ECH endpoint is off unless ECH_PATH is set (keep it as a secret: `wrangler secret put ECH_PATH`).
+const echPath = (env) => {
+  const p = String(env?.ECH_PATH || "").trim().replace(/^\/+/, "").replace(/\/+$/, "");
+  return p && !["dns-query", "health", "resolve"].includes(p) ? "/" + p : null;
+};
 
 // ---------- base64 ----------
 function b64urlDecode(s) {
@@ -219,14 +222,26 @@ function cacheTtl(msg) {
 }
 
 async function upstreamQuery(env, ctx, origin, name, type, ecs) {
+  const q = buildQuery(name, type, 0, ecs ? [ecs.rr] : []);
+  const key = `${encodeURIComponent(name)}/${type}/${ecs ? encodeURIComponent(ecs.subnet) : "-"}`;
+  return upstreamRaw(env, ctx, origin, q, key);
+}
+
+// Forward the client's own query bytes (EDNS/DO/CD/class preserved), id zeroed for cacheability.
+async function upstreamForward(env, ctx, origin, query) {
+  const q = withId(query, 0);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", q));
+  return upstreamRaw(env, ctx, origin, q, "raw/" + b64Encode(digest, true));
+}
+
+async function upstreamRaw(env, ctx, origin, q, keyPart) {
   const cacheOn = !/^(0|off|false|no)$/i.test(String(env?.CACHE ?? "on"));
-  const key = `${origin}/__dns_cache/${encodeURIComponent(name)}/${type}/${ecs ? encodeURIComponent(ecs.subnet) : "-"}`;
+  const key = `${origin}/__dns_cache/${keyPart}`;
   const cache = cacheOn && typeof caches !== "undefined" ? caches.default : null;
   if (cache) {
     const hit = await cache.match(key).catch(() => null);
     if (hit) return new Uint8Array(await hit.arrayBuffer());
   }
-  const q = buildQuery(name, type, 0, ecs ? [ecs.rr] : []);
   const res = await fetch(getUpstream(env), {
     method: "POST",
     headers: { accept: "application/dns-message", "content-type": "application/dns-message", "cache-control": "no-store" },
@@ -235,7 +250,8 @@ async function upstreamQuery(env, ctx, origin, name, type, ecs) {
   if (!res.ok) throw new Error(`upstream HTTP ${res.status}`);
   const buf = new Uint8Array(await res.arrayBuffer());
   if (cache) {
-    const ttl = cacheTtl(parseMessage(buf));
+    let ttl = 0;
+    try { ttl = cacheTtl(parseMessage(buf)); } catch { ttl = 0; }
     if (ttl > 0) {
       const put = cache.put(key, new Response(buf, { headers: { "content-type": "application/dns-message", "cache-control": `max-age=${ttl}` } })).catch(() => {});
       ctx?.waitUntil ? ctx.waitUntil(put) : await put;
@@ -258,7 +274,8 @@ function parseSvcParams(rdata) {
   return { priority: dv.getUint16(0), params };
 }
 function skipName(buf, off) {
-  while (buf[off] !== 0) off += buf[off] + 1;
+  while (off < buf.length && buf[off] !== 0) off += buf[off] + 1;
+  if (off >= buf.length) throw new Error("truncated name in rdata");
   return off + 1;
 }
 
@@ -407,9 +424,8 @@ function requestOptions(url) {
 async function resolveWire(env, ctx, url, request, query, ech) {
   const reqMsg = parseMessage(query);
   const q = reqMsg.questions[0];
-  if (!q || reqMsg.qd !== 1) throw new Error("expected exactly one question");
   const ecs = on(env?.ECS) ? ecsOption(request.headers.get("cf-connecting-ip")) : null;
-  if (ech) {
+  if (ech && q && reqMsg.qd === 1) {
     try {
       const r = await echResolve(env, ctx, url.origin, reqMsg, requestOptions(url), ecs);
       if (r) return { wire: buildResponse(reqMsg, q, r.answers), rewritten: true, info: r.info };
@@ -417,7 +433,10 @@ async function resolveWire(env, ctx, url, request, query, ech) {
       console.error("ECH rewrite failed, falling back:", e?.message || e);
     }
   }
-  const buf = await upstreamQuery(env, ctx, url.origin, q.name, q.type, ecs);
+  // ECS needs the query rebuilt with our OPT record; otherwise forward the client's bytes untouched.
+  const buf = ecs && q && reqMsg.qd === 1
+    ? await upstreamQuery(env, ctx, url.origin, q.name, q.type, ecs)
+    : await upstreamForward(env, ctx, url.origin, query);
   return { wire: withId(buf, reqMsg.id), rewritten: false };
 }
 
@@ -435,7 +454,12 @@ async function dohEndpoint(request, env, ctx, url, ech) {
   if (!["GET", "POST"].includes(request.method)) {
     return new Response("Method not allowed", { status: 405, headers: textHeaders({ allow: "GET, POST, OPTIONS" }) });
   }
-  const query = await readQuery(request, url);
+  let query;
+  try {
+    query = await readQuery(request, url);
+  } catch {
+    return new Response("Bad DNS query", { status: 400, headers: textHeaders() });
+  }
   if (query === null) return new Response("ok", { status: 200, headers: textHeaders() });
   if (query === "bad-type") return new Response("Unsupported content-type", { status: 415, headers: textHeaders() });
   try {
@@ -470,7 +494,7 @@ async function resolveJson(request, env, ctx, url) {
   const name = (url.searchParams.get("name") || "").trim().toLowerCase().replace(/\.$/, "");
   const typeS = (url.searchParams.get("type") || "A").toUpperCase();
   const type = TYPE[typeS] || +typeS;
-  if (!name || !type) return new Response(JSON.stringify({ error: "usage: /resolve?name=example.com&type=A|AAAA|HTTPS&mode=ech|plain" }), { status: 400, headers: jsonHeaders() });
+  if (!name || !type) return new Response(JSON.stringify({ error: "usage: <ECH_PATH>/resolve?name=example.com&type=A|AAAA|HTTPS&mode=ech|plain" }), { status: 400, headers: jsonHeaders() });
   const ech = (url.searchParams.get("mode") || "ech").toLowerCase() === "ech";
   try {
     const { wire, rewritten, info } = await resolveWire(env, ctx, url, request, buildQuery(name, type, 0), ech);
@@ -487,10 +511,17 @@ export async function handle(request, env = {}, ctx = {}) {
   const ePath = echPath(env);
   if (url.pathname === "/") return new Response("DoH Proxy running. Endpoint: /dns-query", { status: 200, headers: textHeaders() });
   if (url.pathname === "/health") {
-    return new Response(JSON.stringify({ status: "ok", service: "doh-proxy", endpoint: "/dns-query", ech: true, cache: !/^(0|off|false|no)$/i.test(String(env?.CACHE ?? "on")) }), { status: 200, headers: jsonHeaders() });
+    return new Response(JSON.stringify({ status: "ok", service: "doh-proxy", endpoint: "/dns-query" }), { status: 200, headers: jsonHeaders() });
   }
-  if (url.pathname === "/dns-query") return dohEndpoint(request, env, ctx, url, false);
-  if (url.pathname === ePath) return dohEndpoint(request, env, ctx, url, true);
-  if (url.pathname === "/resolve" && request.method === "GET") return resolveJson(request, env, ctx, url);
-  return new Response("Not Found", { status: 404, headers: textHeaders() });
+  const isDoh = url.pathname === "/dns-query" || (ePath && url.pathname === ePath);
+  const isResolve = ePath && url.pathname === ePath + "/resolve" && request.method === "GET";
+  if (!isDoh && !isResolve) return new Response("Not Found", { status: 404, headers: textHeaders() });
+  // Optional per-IP rate limit (Workers Rate Limiting binding named RL).
+  if (env?.RL?.limit) {
+    const ip = request.headers.get("cf-connecting-ip") || "unknown";
+    const { success } = await env.RL.limit({ key: ip }).catch(() => ({ success: true }));
+    if (!success) return new Response("Too Many Requests", { status: 429, headers: textHeaders({ "retry-after": "60" }) });
+  }
+  if (isResolve) return resolveJson(request, env, ctx, url);
+  return dohEndpoint(request, env, ctx, url, url.pathname !== "/dns-query");
 }

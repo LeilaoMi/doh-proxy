@@ -5,20 +5,21 @@
 | 端点 | 用途 | 行为 |
 |---|---|---|
 | `/dns-query` | v2rayNG / Karing / sing-box 等代理客户端 | 纯净转发上游，不改写 |
-| `/ech`（可改名） | Chrome / Edge / Firefox 浏览器「安全 DNS」 | 对 Cloudflare 托管站点改写应答，实现 **ECH 直连** |
+| `/<ECH_PATH>`（默认关闭） | Chrome / Edge / Firefox 浏览器「安全 DNS」 | 对 Cloudflare 托管站点改写应答，实现 **ECH 直连** |
 
-当前线上端点：
+当前线上端点（ECH 端点路径为私有 secret，不写在这里）：
 
 ```text
 https://doh.leilaomi.ccwu.cc/dns-query   # 代理客户端
-https://doh.leilaomi.ccwu.cc/ech         # 浏览器（ECH_PATH 可改）
 ```
 
 ## 功能
 
 - 标准 RFC 8484 DoH：`GET ?dns=...` 与 `POST application/dns-message`。
 - `GET /dns-query` 空访问返回 `200 ok`，兼容 Karing 可用性检测。
-- `GET /health` 健康检查；`GET /resolve?name=&type=&mode=` 返回 JSON，手机浏览器上就能看改写结果。
+- `GET /health` 健康检查；`GET /<ECH_PATH>/resolve?name=&type=&mode=` 返回 JSON，手机浏览器上就能看改写结果。
+- `/dns-query` 原样转发客户端报文（保留 EDNS、DO、CD 等），仅在开启 ECS 时重建查询。
+- 可选按 IP 限速（Workers Rate Limiting 绑定 `RL`，默认 600 次/分钟），超出返回 429。
 - **ECH 改写模式**（见下文）：注入 Cloudflare ECHConfig + alpn，A/AAAA 换成优选 IP，CNAME 展平。
 - 优选 IP 来自同账号的 [cf-best-ip](https://github.com/LeilaoMi/cf-best-ip)（Service Binding），支持按运营商挑选。
 - 可选 ECS（EDNS Client Subnet），默认关闭。
@@ -29,7 +30,7 @@ https://doh.leilaomi.ccwu.cc/ech         # 浏览器（ECH_PATH 可改）
 
 浏览器开启 DoH 后会并行查询 A / AAAA / HTTPS（type 65）记录。HTTPS 记录里的 `ech=` 是服务器公钥，浏览器据此把真实域名加密进 ClientHello 内层，线路上只能看到外层 SNI `cloudflare-ech.com`。
 
-`/ech` 端点对每个 A / AAAA / HTTPS 查询：
+ECH 端点对每个 A / AAAA / HTTPS 查询：
 
 1. 先向上游查 A 记录，地址落在 Cloudflare 公布网段内即判定为 CF 站点；没有 A 记录时再看 AAAA（也可用 `ECH_FORCE` / `ECH_EXCLUDE` 手动指定）。不用 SOA/NS 判定：CF 托管的域名里可能有未开代理（灰云）的记录，按 SOA 改写会把这类站点解析坏。
 2. 非 CF 站点：原样转发。
@@ -54,7 +55,7 @@ Cloudflare 边缘对所有 CF 站点都接受 ECH，即使站点面板里关了 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `DOH_UPSTREAM` / `DOH` | `cloudflare-dns.com` | 上游 DoH |
-| `ECH_PATH` | `/ech` | ECH 端点路径，建议改成不易猜到的路径，避免被当公共 DoH 滥用 |
+| `ECH_PATH` | 空（关闭） | ECH 端点路径。用 `wrangler secret put ECH_PATH` 设置不可猜测的值，不要写进仓库；泄露后换一个即可 |
 | `ECH_ALPN` | `h3,h2` | 注入的 alpn |
 | `ECH_ALPN_BY_ISP` | `ct:h3,h2;cu:h3,h2;cm:h2` | 带 `?isp=` 时按运营商覆盖 alpn。Worker 发不了 UDP，无法实测 QUIC，所以是静态开关 |
 | `ECH_SOURCE` | `cloudflare-ech.com` | 从哪个域名获取 ECHConfig |
@@ -78,23 +79,23 @@ service = "cf-best-ip"
 ### 请求级参数（写在 DoH 地址后面）
 
 ```text
-https://doh.example.com/ech?isp=cm          # 按运营商挑优选 IP：ct 电信 / cu 联通 / cm 移动
-https://doh.example.com/ech?ip4=1.2.3.4,5.6.7.8&ip6=2606:4700::1
-https://doh.example.com/ech?alpn=h2         # 只给 h2
-https://doh.example.com/ech?no6=1           # 不返回 IPv6
+https://doh.example.com/<ECH_PATH>?isp=cm          # 按运营商挑优选 IP：ct 电信 / cu 联通 / cm 移动
+https://doh.example.com/<ECH_PATH>?ip4=1.2.3.4,5.6.7.8&ip6=2606:4700::1
+https://doh.example.com/<ECH_PATH>?alpn=h2         # 只给 h2
+https://doh.example.com/<ECH_PATH>?no6=1           # 不返回 IPv6
 ```
 
 ## 客户端设置
 
 ### 电脑 / 手机浏览器（ECH 直连）
 
-- Chrome / Edge：设置 → 隐私和安全 → 安全 → 使用安全 DNS → 自定义，填 `https://doh.example.com/ech`（可带 `?isp=`）。
+- Chrome / Edge：设置 → 隐私和安全 → 安全 → 使用安全 DNS → 自定义，填 `https://doh.example.com/<ECH_PATH>`（可带 `?isp=`）。
 - Firefox：设置 → 隐私与安全 → DNS over HTTPS → 最大保护，自定义填同一地址。
 - 验证：打开 `https://crypto.cloudflare.com/cdn-cgi/trace`，看到 `sni=encrypted` 即生效。
 
 ### v2rayNG / Karing（代理客户端）
 
-- 只用 `/dns-query`，不要用 `/ech`：ECH 会让客户端看不到真实域名，按域名分流可能失效。
+- 只用 `/dns-query`，不要用 ECH 端点：ECH 会让客户端看不到真实域名，按域名分流可能失效。
 - 远程 DNS / 代理流量 DNS 填 `https://doh.example.com/dns-query`。
 - 代理服务器 DNS / 启动 DNS 用 system、223.5.5.5、119.29.29.29 等，不要用自建 DoH。
 
@@ -107,6 +108,7 @@ https://doh.example.com/ech?no6=1           # 不返回 IPv6
 ```bash
 npm install -g wrangler
 wrangler login            # 或设置 CLOUDFLARE_API_TOKEN
+wrangler secret put ECH_PATH   # 首次部署设置一次
 wrangler deploy
 ```
 
@@ -118,7 +120,7 @@ wrangler deploy
 wrangler pages deploy public --project-name doh-proxy
 ```
 
-`functions/` 下的 `dns-query.js`、`ech.js`、`health.js`、`resolve.js` 都复用 `src/doh.js`。Pages 版的 ECH 路径固定为 `/ech`；优选 IP 需用 `BEST_IPV4` 或 `BEST_IP_URL`。
+`functions/[[path]].js` 把所有请求交给 `src/doh.js`，所以私有 `ECH_PATH` 在 Pages 上同样可用；优选 IP 需用 `BEST_IPV4` 或 `BEST_IP_URL`（Pages 无 Service Binding 限速绑定时不限速）。
 
 ## 测试
 
@@ -131,9 +133,9 @@ node scripts/test-doh.js https://doh.example.com/dns-query example.com [CF站点
 手动查看改写结果：
 
 ```bash
-curl "https://doh.example.com/resolve?name=discord.com&type=HTTPS"
-curl "https://doh.example.com/resolve?name=discord.com&type=A&isp=ct"
-curl "https://doh.example.com/resolve?name=www.google.com&type=A&mode=plain"
+curl "https://doh.example.com/<ECH_PATH>/resolve?name=discord.com&type=HTTPS"
+curl "https://doh.example.com/<ECH_PATH>/resolve?name=discord.com&type=A&isp=ct"
+curl "https://doh.example.com/<ECH_PATH>/resolve?name=www.google.com&type=A&mode=plain"
 ```
 
 ## 同类项目参考

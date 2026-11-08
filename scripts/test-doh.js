@@ -75,8 +75,11 @@ async function main() {
       return { status: response.status, type: response.headers.get("content-type"), valid: response.status === 415 };
     }),
     timed("ECH rewrite", async () => {
+      // 需要环境变量 ECH_PATH（与线上 secret 一致）；未设置时跳过
+      const echPath = (process.env.ECH_PATH || "").replace(/^\/+|\/+$/g, "");
+      if (!echPath) return { ok: true, status: 200, valid: true, type: "skipped (ECH_PATH unset)" };
       const echName = process.argv[4] || "crypto.cloudflare.com";
-      const response = await fetch(`${baseUrl}/resolve?name=${echName}&type=HTTPS&mode=ech`);
+      const response = await fetch(`${baseUrl}/${echPath}/resolve?name=${echName}&type=HTTPS&mode=ech`);
       const body = await response.json();
       const data = body.answers?.[0]?.data || {};
       return { status: response.status, type: response.headers.get("content-type"), valid: body.rewritten === true && !!data.ech, answers: body.answers?.length ?? 0 };
