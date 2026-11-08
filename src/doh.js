@@ -5,6 +5,10 @@ const DEFAULT_UPSTREAM = "cloudflare-dns.com";
 const DEFAULT_ECH_SOURCE = "cloudflare-ech.com";
 const DEFAULT_ALPN = "h3,h2";
 const DEFAULT_MAX_IPS = 4;
+// China Mobile throttles overseas UDP heavily, so it gets h2 only by default.
+// Override with ECH_ALPN_BY_ISP, or set it to "off" to disable per-carrier alpn.
+const DEFAULT_ALPN_BY_ISP = "ct:h3,h2;cu:h3,h2;cm:h2";
+const ISPS = new Set(["ct", "cu", "cm"]);
 const REWRITE_TTL = 300;
 
 const TYPE = { A: 1, CNAME: 5, AAAA: 28, OPT: 41, HTTPS: 65 };
@@ -302,9 +306,14 @@ async function getEchConfig(env, ctx, origin) {
 // ---------- preferred IP pool ----------
 async function getPreferredIps(env, opts) {
   const max = Math.max(1, Math.min(8, +(env?.MAX_IPS || DEFAULT_MAX_IPS)));
-  // Per-request overrides: ?ip4=a,b&ip6=c
-  let v4 = opts.ip4.length ? opts.ip4 : list(env?.BEST_IPV4);
-  let v6 = opts.ip6.length ? opts.ip6 : list(env?.BEST_IPV6);
+  // Precedence: ?ip4=/?ip6= > BEST_IPV4_<ISP>/BEST_IPV6_<ISP> (with ?isp=) > BEST_IPV4/BEST_IPV6 > pool.
+  const fixed = (fam) => {
+    const k = `BEST_IP${fam}`;
+    const own = opts.isp ? list(env?.[`${k}_${opts.isp.toUpperCase()}`]) : [];
+    return own.length ? own : list(env?.[k]);
+  };
+  let v4 = opts.ip4.length ? opts.ip4 : fixed("V4");
+  let v6 = opts.ip6.length ? opts.ip6 : fixed("V6");
   if (!opts.ip4.length && !v4.length && (env?.BESTIP || env?.BEST_IP_URL)) {
     const pool = await loadPool(env).catch(() => []);
     const pick = (fam) => {
@@ -355,8 +364,9 @@ async function classify(env, ctx, origin, name, ecs) {
 // ECH_ALPN_BY_ISP="ct:h3,h2;cu:h3,h2;cm:h2" -> per-carrier alpn when ?isp= is given.
 // Workers cannot send UDP, so QUIC reachability cannot be probed here; this is a static per-carrier switch.
 function alpnForIsp(env, isp) {
-  if (!isp || !env?.ECH_ALPN_BY_ISP) return null;
-  for (const part of String(env.ECH_ALPN_BY_ISP).split(";")) {
+  const rules = String(env?.ECH_ALPN_BY_ISP ?? DEFAULT_ALPN_BY_ISP).trim();
+  if (!isp || !rules || /^(0|off|false|no)$/i.test(rules)) return null;
+  for (const part of rules.split(";")) {
     const [k, v] = part.split(":");
     if (k && v && k.trim().toLowerCase() === isp) return v;
   }
@@ -414,7 +424,7 @@ function requestOptions(url) {
   return {
     ip4: list(p.get("ip4")).filter(isV4),
     ip6: list(p.get("ip6")).filter(isV6),
-    isp: (p.get("isp") || "").toLowerCase() || null, // ct / cu / cm
+    isp: ISPS.has((p.get("isp") || "").toLowerCase()) ? p.get("isp").toLowerCase() : null, // ct / cu / cm
     alpn: p.has("alpn") ? list(p.get("alpn")) : null,
     no6: on(p.get("no6")),
   };

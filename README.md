@@ -22,10 +22,28 @@ https://doh.example.com/<ECH_PATH>       # 浏览器
 - `/dns-query` 原样转发客户端报文（保留 EDNS、DO、CD 等），仅在开启 ECS 时重建查询。
 - 可选按 IP 限速（Workers Rate Limiting 绑定 `RL`，默认 600 次/分钟），超出返回 429。
 - **ECH 改写模式**（见下文）：注入 Cloudflare ECHConfig + alpn，A/AAAA 换成优选 IP，CNAME 展平。
-- 优选 IP 来自同账号的 [cf-best-ip](https://github.com/LeilaoMi/cf-best-ip)（Service Binding），支持按运营商挑选。
+- 优选 IP 三档可选：不配（用 CF 原 IP）/ 固定列表（可分运营商）/ 自建优选池（如 [cf-best-ip](https://github.com/LeilaoMi/cf-best-ip)），见「优选 IP」。
 - 可选 ECS（EDNS Client Subnet），默认关闭。
 - 按 DNS TTL 缓存（Cache API，10–300 秒），可关闭。
 - CORS / OPTIONS 支持；Workers 与 Pages Functions 共用 `src/doh.js` 一份代码。
+
+## 快速开始（fork 后）
+
+两条路，按需选：
+
+**只要一个 DoH 给代理客户端用**
+
+1. fork 本仓库，`wrangler deploy`（或在 Cloudflare 控制台连接你的 fork 自动部署）。不用改任何文件。
+2. 在 Worker 设置里绑定你自己的域名（国内访问 `workers.dev` 常被 SNI 阻断）。
+3. 客户端填 `https://你的域名/dns-query`。
+
+**还要浏览器 ECH 直连**
+
+4. `wrangler secret put ECH_PATH`，设一个不可猜测的路径（例如 16 位随机串）。
+5. 按需配置优选 IP（不配也能用）。
+6. 浏览器安全 DNS 填 `https://你的域名/<ECH_PATH>?isp=ct|cu|cm`，打开 `https://crypto.cloudflare.com/cdn-cgi/trace` 看到 `sni=encrypted` 即成功。
+
+变量都在控制台「设置 → 变量和机密」里填。`wrangler.toml` 设了 `keep_vars = true` 且没有 `[vars]`，同步上游、重新部署都不会冲掉你填的值；请不要为个人配置改 `wrangler.toml`，否则同步上游会冲突。
 
 ## ECH 改写模式原理
 
@@ -48,34 +66,48 @@ Cloudflare 边缘对所有 CF 站点都接受 ECH，即使站点面板里关了 
 - 只对 **托管在 Cloudflare 上** 的网站有效；Google、YouTube 等原样返回，仍需代理。
 - 直连时目标网站能看到你的真实 IP，也绕不过地区限制。
 - 外层 SNI 固定是 `cloudflare-ech.com`，特征明显，存在被针对的可能。
-- 国内对境外 UDP 443 常有限速，`h3` 不通时浏览器会回退 `h2`；若体验差可把 `ECH_ALPN` 改为 `h2`。
+- 国内对境外 UDP 443 常有限速，`h3` 不通时浏览器会回退 `h2`；默认对移动（`?isp=cm`）只给 `h2`，其他情况体验差可加 `?alpn=h2` 或把 `ECH_ALPN` 改为 `h2`。
 - 浏览器必须自己用 DoH 查 HTTPS 记录才会用 ECH；只在系统或路由器设 DNS 不生效。
 
-## 配置（`wrangler.toml` 的 `[vars]` 或控制台环境变量）
+## 配置（控制台变量；默认值都在代码里，全部可选）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `DOH_UPSTREAM` / `DOH` | `cloudflare-dns.com` | 上游 DoH |
 | `ECH_PATH` | 空（关闭） | ECH 端点路径。用 `wrangler secret put ECH_PATH` 设置不可猜测的值，不要写进仓库；泄露后换一个即可 |
 | `ECH_ALPN` | `h3,h2` | 注入的 alpn |
-| `ECH_ALPN_BY_ISP` | `ct:h3,h2;cu:h3,h2;cm:h2` | 带 `?isp=` 时按运营商覆盖 alpn。Worker 发不了 UDP，无法实测 QUIC，所以是静态开关 |
+| `ECH_ALPN_BY_ISP` | `ct:h3,h2;cu:h3,h2;cm:h2` | 带 `?isp=` 时按运营商覆盖 alpn，设为 `off` 关闭。Worker 发不了 UDP，无法实测 QUIC，所以是静态开关 |
 | `ECH_SOURCE` | `cloudflare-ech.com` | 从哪个域名获取 ECHConfig |
 | `ECH_CONFIG` | 空 | 固定 ECHConfig（base64），设置后不再自动获取 |
 | `ECH_FORCE` | 空 | 强制按 CF 处理的域名后缀，逗号分隔（需配合优选 IP） |
 | `ECH_EXCLUDE` | 空 | 永不改写的域名后缀 |
-| `BEST_IPV4` / `BEST_IPV6` | 空 | 固定优选 IP，逗号分隔，优先级高于优选池 |
-| `BEST_IP_URL` | 空 | 优选池地址（cf-best-ip `/api/ips` 格式）。有 `BESTIP` 绑定时也用它的 host，需与 cf-best-ip 的 `ALLOWED_HOSTS` 一致 |
+| `BEST_IPV4` / `BEST_IPV6` | 空 | 固定优选 IP，逗号分隔 |
+| `BEST_IPV4_CT` / `_CU` / `_CM`（IPv6 同理） | 空 | 按运营商的固定优选 IP，带 `?isp=` 时优先使用 |
+| `BEST_IP_URL` | 空 | 优选池地址，格式见「优选 IP」。有 `BESTIP` 绑定时也用它的 host |
 | `MAX_IPS` | `4` | 每个地址族最多返回几个 IP（1–8） |
 | `ECS` | `off` | 开启后把客户端 IP 的 /24（IPv6 /56）写入 EDNS。默认上游 1.1.1.1 不使用 ECS，配合 `dns.google` 才有意义 |
 | `CACHE` | `on` | 按 TTL 缓存上游应答 |
 
-绑定：
+## 优选 IP
 
-```toml
-[[services]]
-binding = "BESTIP"      # 优选 IP 池
-service = "cf-best-ip"
+由简到繁三档，任选其一：
+
+1. **不配**：返回上游原始的 CF 地址，ECH 照样生效，只是不一定是最快的线路。
+2. **固定列表**：控制台填 `BEST_IPV4`，或按运营商分开填 `BEST_IPV4_CT` / `BEST_IPV4_CU` / `BEST_IPV4_CM`，浏览器地址带 `?isp=` 选用。列表需自己定期测速更新。
+3. **自建优选池**：部署一个定时测速的服务，返回下面的 JSON，填进 `BEST_IP_URL`。同账号的 Worker 建议用 Service Binding（`BESTIP`，见 `wrangler.prod.example.toml`）调用：Worker 用公网地址调同账号同 zone 的 Worker 可能失败。
+
+```json
+{ "ips": [
+  { "ip": "104.16.1.1", "family": "v4", "carrier": "ct" },
+  { "ip": "2606:4700::1", "family": "v6", "carrier": "cm", "tested": true }
+] }
 ```
+
+`family` 必填（`v4` / `v6`）；`carrier` 可选（`ct` / `cu` / `cm`），带 `?isp=` 时据此筛选，筛不到就用全部；`tested: false` 的条目会被忽略。池结果缓存 10 分钟，请求失败时回退上游 IP。
+
+优先级：`?ip4=` / `?ip6=` > `BEST_IPV4_<运营商>` > `BEST_IPV4` > 优选池 > 上游原 IP。
+
+不建议使用别人的公共优选池：池决定流量去哪个 IP。TLS 证书仍会校验，不会被劫持，但可能被导向慢或不可用的节点，对方也随时可能限制访问。
 
 ### 请求级参数（写在 DoH 地址后面）
 
@@ -104,30 +136,32 @@ https://doh.example.com/<ECH_PATH>?no6=1           # 不返回 IPv6
 
 不建议在使用 CF 节点时开启。系统 DoT 的请求会被代理 App 的 VPN 收进隧道，而 CF Worker 节点无法连接 Cloudflare 自己的 IP（Zero Trust Gateway 的 DoT 正好在 CF 上），结果 DNS 全部失败，看起来像节点不可用；VPS 节点不受影响。建议关闭私人 DNS，在代理 App 内配置 DoH。
 
-## 部署（手动）
+## 部署
+
+### 通用部署（fork 用户）
 
 ```bash
 npm install -g wrangler
 wrangler login                 # 或设置 CLOUDFLARE_API_TOKEN
-wrangler secret put ECH_PATH   # 首次部署设置一次，例如 16 位随机串
-wrangler deploy                # 通用配置，部署到 workers.dev
+wrangler secret put ECH_PATH   # 需要 ECH 时设置一次
+wrangler deploy
 ```
 
-> 注意：通用配置的 Worker 名也是 `doh-proxy`。账号里已有按生产配置部署的同名 Worker 时，`wrangler deploy` 会覆盖它（打开公开的 workers.dev 地址、去掉 `BESTIP` 绑定）。已上线的生产环境只用 `wrangler deploy -c wrangler.prod.toml`；想并行测试，先把 `wrangler.toml` 的 `name` 改成别的，例如 `doh-proxy-test`。
+也可以在 Cloudflare 控制台创建 Worker 时连接你的 fork，推送即部署，效果相同。部署后在 Worker 设置里绑定自定义域名、填变量。
 
-### 绑定自己的域名和优选池
+### 需要 Service Binding 或想把域名写进配置
 
-`wrangler.toml` 是通用配置，fork 后不用改就能部署。个人配置单独放：
+Service Binding 只能写在配置文件里。复制模板，个人配置不入库：
 
 ```bash
-cp wrangler.prod.example.toml wrangler.prod.toml   # 已 gitignore，不会提交
+cp wrangler.prod.example.toml wrangler.prod.toml   # 已 gitignore
 # 必改：routes 里的域名
-# 必改：BEST_IP_URL 的 host 换成 cf-best-ip 的 ALLOWED_HOSTS 里允许的域名，否则优选池请求被拒、回退上游 IP
+# 必改：BEST_IP_URL 的 host 换成 cf-best-ip 的 ALLOWED_HOSTS 里允许的域名
 # 没有 cf-best-ip：删掉 [[services]] 和 BEST_IP_URL
 wrangler deploy -c wrangler.prod.toml
 ```
 
-`wrangler.prod.example.toml` 关闭了 workers.dev（国内常被 SNI 阻断），并带上 `BESTIP` 绑定和 `RL` 限速。
+> 两份配置的 Worker 名都是 `doh-proxy`。已用 `wrangler.prod.toml` 部署的，之后也只用它部署；直接 `wrangler deploy` 会打开 workers.dev 并去掉 `BESTIP` 绑定。想并行测试，先改 `wrangler.toml` 的 `name`，例如 `doh-proxy-test`。
 
 ### Pages Functions（可选）
 
@@ -138,7 +172,7 @@ wrangler pages deploy public --project-name doh-proxy
 
 Pages 没有 `RL` 限速绑定，`/dns-query` 不受限速保护；需要限速时请在 zone 的 WAF 里加 Rate limiting 规则，或只用 Workers 版。
 
-`functions/[[path]].js` 把所有请求交给 `src/doh.js`，所以私有 `ECH_PATH` 在 Pages 上同样可用；优选 IP 需用 `BEST_IPV4` 或 `BEST_IP_URL`。
+`functions/[[path]].js` 把所有请求交给 `src/doh.js`，所以私有 `ECH_PATH` 在 Pages 上同样可用；优选 IP 用固定列表或 `BEST_IP_URL`。
 
 ## 测试
 

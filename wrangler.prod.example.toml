@@ -1,38 +1,30 @@
+# 个人生产配置模板。复制为 wrangler.prod.toml（已 gitignore，不会提交）后修改：
+#   cp wrangler.prod.example.toml wrangler.prod.toml
+#   wrangler deploy -c wrangler.prod.toml
+# 只有 routes、Service Binding 这类必须写在配置文件里的东西才放这里；
+# 普通变量（BEST_IPV4_CT 等）也可以继续在控制台填，keep_vars 会保留它们。
 name = "doh-proxy"
 main = "worker.js"
 compatibility_date = "2026-05-30"
-# 个人生产配置模板：复制为 wrangler.prod.toml（已 gitignore）后改成自己的域名
-# 部署：wrangler deploy -c wrangler.prod.toml
-# 关闭 workers.dev（国内 SNI 被封），只走自定义域名
+keep_vars = true
+
+# 关闭 workers.dev（国内常被 SNI 阻断），只走自定义域名
 workers_dev = false
 routes = [
-  { pattern = "doh.example.com", custom_domain = true }
+  { pattern = "doh.example.com", custom_domain = true }   # 必改：你的域名
 ]
 
-# 优选 IP 池：通过 Service Binding 直接调用同账号的 cf-best-ip Worker（不走公网、不受 Worker 互访限制）
-[[services]]
-binding = "BESTIP"
-service = "cf-best-ip"   # 同账号里的优选池 Worker；没有就删掉这段
-
-# 按客户端 IP 限速，防止被当公共 DoH 刷配额（浏览器 DoH 会并发查询，阈值不宜太低）
 [[ratelimits]]
 name = "RL"
 namespace_id = "1001"
 simple = { limit = 600, period = 60 }
 
-# ECH 端点默认关闭。用 secret 设置不可猜测的路径，不要写进本文件或 README：
-#   wrangler secret put ECH_PATH      # 例如 ech-3f9c1a7b2d
-# 调试接口随之位于 <ECH_PATH>/resolve
+# 可选：同账号部署了 cf-best-ip 时，用 Service Binding 调用优选池（不走公网）。
+# 没有就删掉这一段和下面的 BEST_IP_URL。
+[[services]]
+binding = "BESTIP"
+service = "cf-best-ip"
 
 [vars]
-ECH_ALPN = "h3,h2"
-# 按运营商覆盖 alpn（仅在 DoH 地址带 ?isp= 时生效）；移动对境外 UDP 限速较重，默认只给 h2
-ECH_ALPN_BY_ISP = "ct:h3,h2;cu:h3,h2;cm:h2"
-ECH_SOURCE = "cloudflare-ech.com"
-MAX_IPS = "4"
-# 优选池地址；有 BESTIP 绑定时走绑定，但 host 必须是 cf-best-ip 的 ALLOWED_HOSTS
-# 必改：host 必须在 cf-best-ip 的 ALLOWED_HOSTS 里，否则绑定请求被拒、回退上游 IP
+# 必改：host 必须在 cf-best-ip 的 ALLOWED_HOSTS 里，否则请求被拒、回退上游 IP
 BEST_IP_URL = "https://bestip.example.com/api/ips?limit=60"
-# ECS 仅对支持 ECS 的上游（如 dns.google）有意义；默认上游 1.1.1.1 不使用 ECS
-ECS = "off"
-CACHE = "on"
