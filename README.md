@@ -1,274 +1,157 @@
 # Cloudflare DoH Proxy
 
-一个极简、稳定、适合 v2rayNG / Karing 使用的 DNS over HTTPS（DoH）代理。
+一个跑在 Cloudflare Workers 上的 DNS over HTTPS（DoH）代理，提供两个端点：
 
-当前已验证端点：
+| 端点 | 用途 | 行为 |
+|---|---|---|
+| `/dns-query` | v2rayNG / Karing / sing-box 等代理客户端 | 纯净转发上游，不改写 |
+| `/<ECH_PATH>`（默认关闭） | Chrome / Edge / Firefox 浏览器「安全 DNS」 | 对 Cloudflare 托管站点改写应答，实现 **ECH 直连** |
+
+当前线上端点（ECH 端点路径为私有 secret，不写在这里）：
 
 ```text
-https://doh.leilaomi.ccwu.cc/dns-query
+https://doh.leilaomi.ccwu.cc/dns-query   # 代理客户端
 ```
 
 ## 功能
 
-- 支持标准 RFC 8484 DoH：
-  - `GET /dns-query?dns=...`
-  - `POST /dns-query`，请求头 `content-type: application/dns-message`
-- `GET /dns-query` 空访问返回 `200 ok`，兼容 Karing 这类客户端的可用性检测。
-- `GET /health` 返回 JSON 健康状态，方便监控和排障。
-- 支持 CORS 和 `OPTIONS` 预检请求。
-- 支持通过环境变量切换上游 DoH。
-- 禁用响应缓存，避免 DNS 缓存污染。
-- 同时提供 Workers 和 Pages Functions 两种部署方式。
-- 提供测试脚本：健康检查、OPTIONS、RFC8484 GET、RFC8484 POST。
+- 标准 RFC 8484 DoH：`GET ?dns=...` 与 `POST application/dns-message`。
+- `GET /dns-query` 空访问返回 `200 ok`，兼容 Karing 可用性检测。
+- `GET /health` 健康检查；`GET /<ECH_PATH>/resolve?name=&type=&mode=` 返回 JSON，手机浏览器上就能看改写结果。
+- `/dns-query` 原样转发客户端报文（保留 EDNS、DO、CD 等），仅在开启 ECS 时重建查询。
+- 可选按 IP 限速（Workers Rate Limiting 绑定 `RL`，默认 600 次/分钟），超出返回 429。
+- **ECH 改写模式**（见下文）：注入 Cloudflare ECHConfig + alpn，A/AAAA 换成优选 IP，CNAME 展平。
+- 优选 IP 来自同账号的 [cf-best-ip](https://github.com/LeilaoMi/cf-best-ip)（Service Binding），支持按运营商挑选。
+- 可选 ECS（EDNS Client Subnet），默认关闭。
+- 按 DNS TTL 缓存（Cache API，10–300 秒），可关闭。
+- CORS / OPTIONS 支持；Workers 与 Pages Functions 共用 `src/doh.js` 一份代码。
 
-默认上游：
+## ECH 改写模式原理
 
-```text
-https://cloudflare-dns.com/dns-query
+浏览器开启 DoH 后会并行查询 A / AAAA / HTTPS（type 65）记录。HTTPS 记录里的 `ech=` 是服务器公钥，浏览器据此把真实域名加密进 ClientHello 内层，线路上只能看到外层 SNI `cloudflare-ech.com`。
+
+ECH 端点对每个 A / AAAA / HTTPS 查询：
+
+1. 先向上游查 A 记录，地址落在 Cloudflare 公布网段内即判定为 CF 站点；没有 A 记录时再看 AAAA（也可用 `ECH_FORCE` / `ECH_EXCLUDE` 手动指定）。不用 SOA/NS 判定：CF 托管的域名里可能有未开代理（灰云）的记录，按 SOA 改写会把这类站点解析坏。
+2. 非 CF 站点：原样转发。
+3. CF 站点：
+   - **HTTPS**：合成 `1 . alpn=h3,h2 ipv4hint=<优选> ech=<CF 当前 ECHConfig>`。ECHConfig 从 `cloudflare-ech.com` 的 HTTPS 记录自动获取并缓存 30 分钟（CF 约每小时轮换，旧配置仍有效数小时）。
+   - **A / AAAA**：返回优选 IP，记录直接挂在查询名下（CNAME 展平；Chromium 要求 A/AAAA 与 HTTPS 同名才会用 ECH）。
+   - 没配置优选 IP 时，回退为上游原始的 CF 地址，仍注入 ECH。
+4. 改写过程出错时自动回退为纯转发，不会让解析失败。
+
+Cloudflare 边缘对所有 CF 站点都接受 ECH，即使站点面板里关了 ECH，所以不需要目标站点配合。
+
+### 局限
+
+- 只对 **托管在 Cloudflare 上** 的网站有效；Google、YouTube 等原样返回，仍需代理。
+- 直连时目标网站能看到你的真实 IP，也绕不过地区限制。
+- 外层 SNI 固定是 `cloudflare-ech.com`，特征明显，存在被针对的可能。
+- 国内对境外 UDP 443 常有限速，`h3` 不通时浏览器会回退 `h2`；若体验差可把 `ECH_ALPN` 改为 `h2`。
+- 浏览器必须自己用 DoH 查 HTTPS 记录才会用 ECH；只在系统或路由器设 DNS 不生效。
+
+## 配置（`wrangler.toml` 的 `[vars]` 或控制台环境变量）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `DOH_UPSTREAM` / `DOH` | `cloudflare-dns.com` | 上游 DoH |
+| `ECH_PATH` | 空（关闭） | ECH 端点路径。用 `wrangler secret put ECH_PATH` 设置不可猜测的值，不要写进仓库；泄露后换一个即可 |
+| `ECH_ALPN` | `h3,h2` | 注入的 alpn |
+| `ECH_ALPN_BY_ISP` | `ct:h3,h2;cu:h3,h2;cm:h2` | 带 `?isp=` 时按运营商覆盖 alpn。Worker 发不了 UDP，无法实测 QUIC，所以是静态开关 |
+| `ECH_SOURCE` | `cloudflare-ech.com` | 从哪个域名获取 ECHConfig |
+| `ECH_CONFIG` | 空 | 固定 ECHConfig（base64），设置后不再自动获取 |
+| `ECH_FORCE` | 空 | 强制按 CF 处理的域名后缀，逗号分隔（需配合优选 IP） |
+| `ECH_EXCLUDE` | 空 | 永不改写的域名后缀 |
+| `BEST_IPV4` / `BEST_IPV6` | 空 | 固定优选 IP，逗号分隔，优先级高于优选池 |
+| `BEST_IP_URL` | 空 | 没有 `BESTIP` 绑定时，从这个 URL 拉优选池（cf-best-ip `/api/ips` 格式） |
+| `MAX_IPS` | `4` | 每个地址族最多返回几个 IP（1–8） |
+| `ECS` | `off` | 开启后把客户端 IP 的 /24（IPv6 /56）写入 EDNS。默认上游 1.1.1.1 不使用 ECS，配合 `dns.google` 才有意义 |
+| `CACHE` | `on` | 按 TTL 缓存上游应答 |
+
+绑定：
+
+```toml
+[[services]]
+binding = "BESTIP"      # 优选 IP 池
+service = "cf-best-ip"
 ```
 
-可选环境变量：
+### 请求级参数（写在 DoH 地址后面）
 
 ```text
-DOH_UPSTREAM=https://dns.google/dns-query
+https://doh.example.com/<ECH_PATH>?isp=cm          # 按运营商挑优选 IP：ct 电信 / cu 联通 / cm 移动
+https://doh.example.com/<ECH_PATH>?ip4=1.2.3.4,5.6.7.8&ip6=2606:4700::1
+https://doh.example.com/<ECH_PATH>?alpn=h2         # 只给 h2
+https://doh.example.com/<ECH_PATH>?no6=1           # 不返回 IPv6
 ```
 
-也兼容：
+## 客户端设置
 
-```text
-DOH=dns.google
-```
+### 电脑 / 手机浏览器（ECH 直连）
 
-## 为什么建议绑定自定义子域名？
+- Chrome / Edge：设置 → 隐私和安全 → 安全 → 使用安全 DNS → 自定义，填 `https://doh.example.com/<ECH_PATH>`（可带 `?isp=`）。
+- Firefox：设置 → 隐私与安全 → DNS over HTTPS → 最大保护，自定义填同一地址。
+- 验证：打开 `https://crypto.cloudflare.com/cdn-cgi/trace`，看到 `sni=encrypted` 即生效。
 
-`*.workers.dev` / `*.pages.dev` 在部分网络或客户端里可能不稳定。建议绑定自己的子域名，例如：
+### v2rayNG / Karing（代理客户端）
 
-```text
-https://doh.example.com/dns-query
-```
+- 只用 `/dns-query`，不要用 ECH 端点：ECH 会让客户端看不到真实域名，按域名分流可能失效。
+- 远程 DNS / 代理流量 DNS 填 `https://doh.example.com/dns-query`。
+- 代理服务器 DNS / 启动 DNS 用 system、223.5.5.5、119.29.29.29 等，不要用自建 DoH。
 
-不要默认绑定根域名，除非你明确只想让根域名服务 DoH。
+### 安卓「私人 DNS」（DoT）
 
----
+不建议在使用 CF 节点时开启。系统 DoT 的请求会被代理 App 的 VPN 收进隧道，而 CF Worker 节点无法连接 Cloudflare 自己的 IP（Zero Trust Gateway 的 DoT 正好在 CF 上），结果 DNS 全部失败，看起来像节点不可用；VPS 节点不受影响。建议关闭私人 DNS，在代理 App 内配置 DoH。
 
-## Workers 部署教程
-
-### 1. 安装 Wrangler
+## 部署（手动）
 
 ```bash
 npm install -g wrangler
-```
-
-### 2. 登录 Cloudflare
-
-```bash
-wrangler login
-```
-
-### 3. 配置 `wrangler.toml`
-
-最小配置：
-
-```toml
-name = "doh-proxy"
-main = "worker.js"
-compatibility_date = "2026-05-30"
-workers_dev = true
-```
-
-推荐绑定自定义子域名：
-
-```toml
-name = "doh-proxy"
-main = "worker.js"
-compatibility_date = "2026-05-30"
-workers_dev = true
-routes = [
-  { pattern = "doh.example.com", custom_domain = true }
-]
-```
-
-### 4. 可选：配置上游 DoH
-
-在 Cloudflare Worker 的环境变量里添加：
-
-```text
-DOH_UPSTREAM=https://dns.google/dns-query
-```
-
-如果不设置，默认使用：
-
-```text
-https://cloudflare-dns.com/dns-query
-```
-
-### 5. 部署
-
-```bash
+wrangler login            # 或设置 CLOUDFLARE_API_TOKEN
+wrangler secret put ECH_PATH   # 首次部署设置一次
 wrangler deploy
 ```
 
-部署后端点为：
+`wrangler.toml` 已设 `workers_dev = false` 并绑定自定义域名 `doh.leilaomi.ccwu.cc`。
 
-```text
-https://doh-proxy.<你的 workers.dev 子域>.workers.dev/dns-query
-```
-
-如果绑定了自定义域名，则使用：
-
-```text
-https://doh.example.com/dns-query
-```
-
-也可以直接用命令绑定一次自定义域名：
+### Pages Functions（可选）
 
 ```bash
-wrangler deploy --domain doh.example.com
-```
-
----
-
-## Pages Functions 部署教程
-
-本项目已包含 Pages Functions 文件：
-
-```text
-functions/dns-query.js
-```
-
-以及最小静态页面：
-
-```text
-public/index.html
-```
-
-### 1. 使用 Wrangler 部署 Pages
-
-```bash
+wrangler pages secret put ECH_PATH --project-name doh-proxy   # Pages 不继承 Worker 的 secret
 wrangler pages deploy public --project-name doh-proxy
 ```
 
-部署后端点为：
+Pages 没有 `RL` 限速绑定，`/dns-query` 不受限速保护；需要限速时请在 zone 的 WAF 里加 Rate limiting 规则，或只用 Workers 版。
 
-```text
-https://<你的 Pages 项目>.pages.dev/dns-query
-```
-
-### 2. 可选：配置上游 DoH
-
-在 Cloudflare Pages 项目的环境变量里添加：
-
-```text
-DOH_UPSTREAM=https://dns.google/dns-query
-```
-
-不设置则默认使用：
-
-```text
-https://cloudflare-dns.com/dns-query
-```
-
-### 3. 推荐绑定自定义子域名
-
-在 Cloudflare Dashboard：
-
-1. 打开 **Workers & Pages**。
-2. 选择你的 Pages 项目。
-3. 进入 **Custom domains**。
-4. 添加子域名，例如：
-
-```text
-doh.example.com
-```
-
-最终 DoH 地址：
-
-```text
-https://doh.example.com/dns-query
-```
-
----
+`functions/[[path]].js` 把所有请求交给 `src/doh.js`，所以私有 `ECH_PATH` 在 Pages 上同样可用；优选 IP 需用 `BEST_IPV4` 或 `BEST_IP_URL`。
 
 ## 测试
 
-运行内置测试脚本：
+```bash
+node scripts/test-doh.js https://doh.example.com/dns-query example.com [CF站点，默认 crypto.cloudflare.com]
+```
+
+覆盖：空访问、`/health`、OPTIONS、RFC8484 GET / POST、ECH 改写、415、404。ECH 改写测试需要与线上一致的路径，未设置时显示为跳过：
 
 ```bash
-node scripts/test-doh.js https://doh.example.com/dns-query example.com
+ECH_PATH=<你的路径> node scripts/test-doh.js https://doh.example.com/dns-query example.com
 ```
 
-预期：`health`、`OPTIONS`、`RFC8484 GET`、`RFC8484 POST` 都显示 ✅。
+`RL` 绑定调用异常时会放行请求（优先保证可用性）。
 
-手动健康检查：
+手动查看改写结果：
 
 ```bash
-curl -i https://doh.example.com/dns-query
-curl -i https://doh.example.com/health
+curl "https://doh.example.com/<ECH_PATH>/resolve?name=discord.com&type=HTTPS"
+curl "https://doh.example.com/<ECH_PATH>/resolve?name=discord.com&type=A&isp=ct"
+curl "https://doh.example.com/<ECH_PATH>/resolve?name=www.google.com&type=A&mode=plain"
 ```
 
-预期：
+## 同类项目参考
 
-```text
-HTTP/2 200
-ok
-```
+- [1molchuan/edge-smart-doh](https://github.com/1molchuan/edge-smart-doh)（AGPL-3.0）：按运营商实测优选 IP、探针决定是否给 h3，功能最完整。
+- [RememberOurPromise/Total-ECH](https://github.com/RememberOurPromise/Total-ECH)：CF + Meta CDN 的 ECH 注入，单文件 Worker。
+- [rosenii/Doh-ECH](https://github.com/rosenii/Doh-ECH)：ECH 注入 + HTTPS RR 增强模式。
+- [dahisea/cloudflare-enech-dns-worker](https://github.com/dahisea/cloudflare-enech-dns-worker)：用 SOA 判定 CF 站点。
 
-`/health` 预期返回：
-
-```json
-{"status":"ok","service":"doh-proxy","endpoint":"/dns-query"}
-```
-
-手动 CORS / OPTIONS 检查：
-
-```bash
-curl -i -X OPTIONS https://doh.example.com/dns-query
-```
-
-预期：`204`，并包含：
-
-```text
-access-control-allow-origin: *
-access-control-allow-methods: GET, POST, OPTIONS
-```
-
----
-
-## v2rayNG / Karing 使用建议
-
-远程 DNS / 代理流量 DNS 可填：
-
-```text
-https://doh.example.com/dns-query
-```
-
-Karing 如果出现“检查代理服务器失败”，通常不是本 DoH 协议不可用，而是它被放到了启动阶段 DNS 位置。不要把这个 DoH 用作 **代理服务器 DNS / 节点服务器 DNS / 启动前解析 DNS**。
-
-推荐分工：
-
-```text
-代理服务器 DNS / 启动 DNS：system、1.1.1.1、8.8.8.8、223.5.5.5、119.29.29.29
-远程 DNS / 代理流量 DNS：https://doh.example.com/dns-query
-```
-
-原因：代理尚未建立前，客户端需要先解析服务器域名。如果这一步依赖自建 Worker DoH，而当前网络又无法稳定直连该 DoH 域名，就可能导致连接检查失败。这个自建 DoH 更适合放在 **代理建立之后使用的 DNS** 位置。
-
-## 和 Cloudflare Zero Trust DoH 的区别
-
-| 项目 | 自建 Worker/Pages DoH | Cloudflare Zero Trust DoH |
-|---|---|---|
-| 代码可控 | ✅ | ❌ |
-| 可换上游 | ✅ | ❌ |
-| 适合代理后使用 | ✅ | ✅ |
-| 适合代理前启动解析 | ⚠️ 取决于本地网络 | ✅ 通常更稳 |
-| 推荐用途 | 代理流量 DNS | 代理服务器 DNS / 启动前解析 |
-
-## 从 `cmliu/CF-Workers-DoH` 吸收的点
-
-本项目没有照搬完整功能，而是只吸收对 v2rayNG / Karing 有用、且不会明显增加维护成本的部分：
-
-- CORS / OPTIONS 兼容。
-- 环境变量切换上游 DoH。
-- 测试脚本。
-
-没有加入 `/ip-info`、主页伪装、跳转、TOKEN 路径、JSON 查询页面等功能，因为这些对代理客户端 DoH 使用不是必需项，复杂度和公开服务风险更高。
+本项目代码为独立实现，未复制上述项目代码。

@@ -1,7 +1,33 @@
 name = "doh-proxy"
 main = "worker.js"
 compatibility_date = "2026-05-30"
-workers_dev = true
+# 线上已关闭 workers.dev（国内 SNI 被封），保持一致，避免部署时被重新打开
+workers_dev = false
 routes = [
   { pattern = "doh.leilaomi.ccwu.cc", custom_domain = true }
 ]
+
+# 优选 IP 池：通过 Service Binding 直接调用同账号的 cf-best-ip Worker（不走公网、不受 Worker 互访限制）
+[[services]]
+binding = "BESTIP"
+service = "cf-best-ip"
+
+# 按客户端 IP 限速，防止被当公共 DoH 刷配额（浏览器 DoH 会并发查询，阈值不宜太低）
+[[ratelimits]]
+name = "RL"
+namespace_id = "1001"
+simple = { limit = 600, period = 60 }
+
+# ECH 端点默认关闭。用 secret 设置不可猜测的路径，不要写进本文件或 README：
+#   wrangler secret put ECH_PATH      # 例如 ech-3f9c1a7b2d
+# 调试接口随之位于 <ECH_PATH>/resolve
+
+[vars]
+ECH_ALPN = "h3,h2"
+# 按运营商覆盖 alpn（仅在 DoH 地址带 ?isp= 时生效）；移动对境外 UDP 限速较重，默认只给 h2
+ECH_ALPN_BY_ISP = "ct:h3,h2;cu:h3,h2;cm:h2"
+ECH_SOURCE = "cloudflare-ech.com"
+MAX_IPS = "4"
+# ECS 仅对支持 ECS 的上游（如 dns.google）有意义；默认上游 1.1.1.1 不使用 ECS
+ECS = "off"
+CACHE = "on"
