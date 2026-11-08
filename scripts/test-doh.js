@@ -77,7 +77,7 @@ async function main() {
     timed("ECH rewrite", async () => {
       // 需要环境变量 ECH_PATH（与线上 secret 一致）；未设置时跳过
       const echPath = (process.env.ECH_PATH || "").replace(/^\/+|\/+$/g, "");
-      if (!echPath) return { ok: true, status: 200, valid: true, type: "skipped (ECH_PATH unset)" };
+      if (!echPath) return { ok: true, skipped: true, status: 200, valid: true, type: "ECH_PATH unset" };
       const echName = process.argv[4] || "crypto.cloudflare.com";
       const response = await fetch(`${baseUrl}/${echPath}/resolve?name=${echName}&type=HTTPS&mode=ech`);
       const body = await response.json();
@@ -97,8 +97,8 @@ async function main() {
   const results = await Promise.all(tests);
   for (const result of results) {
     const ok = result.ok && (result.valid === true || (result.status >= 200 && result.status < 300 && result.valid !== false));
-    const detail = result.error || `status=${result.status} type=${result.type || ""} answers=${result.answers ?? "-"} rcode=${result.rcode ?? "-"}`;
-    console.log(`${ok ? "✅" : "❌"} ${result.name.padEnd(12)} ${result.ms.toFixed(1).padStart(7)}ms  ${detail}`);
+    const detail = result.skipped ? `skipped (${result.type})` : result.error || `status=${result.status} type=${result.type || ""} answers=${result.answers ?? "-"} rcode=${result.rcode ?? "-"}`;
+    console.log(`${result.skipped ? "⏭️ " : ok ? "✅" : "❌"} ${result.name.padEnd(12)} ${result.ms.toFixed(1).padStart(7)}ms  ${detail}`);
   }
 
   if (results.some((result) => !(result.ok && (result.valid === true || (result.status >= 200 && result.status < 300 && result.valid !== false))))) process.exitCode = 1;

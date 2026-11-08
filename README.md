@@ -117,10 +117,13 @@ wrangler deploy
 ### Pages Functions（可选）
 
 ```bash
+wrangler pages secret put ECH_PATH --project-name doh-proxy   # Pages 不继承 Worker 的 secret
 wrangler pages deploy public --project-name doh-proxy
 ```
 
-`functions/[[path]].js` 把所有请求交给 `src/doh.js`，所以私有 `ECH_PATH` 在 Pages 上同样可用；优选 IP 需用 `BEST_IPV4` 或 `BEST_IP_URL`（Pages 无 Service Binding 限速绑定时不限速）。
+Pages 没有 `RL` 限速绑定，`/dns-query` 不受限速保护；需要限速时请在 zone 的 WAF 里加 Rate limiting 规则，或只用 Workers 版。
+
+`functions/[[path]].js` 把所有请求交给 `src/doh.js`，所以私有 `ECH_PATH` 在 Pages 上同样可用；优选 IP 需用 `BEST_IPV4` 或 `BEST_IP_URL`。
 
 ## 测试
 
@@ -128,7 +131,13 @@ wrangler pages deploy public --project-name doh-proxy
 node scripts/test-doh.js https://doh.example.com/dns-query example.com [CF站点，默认 crypto.cloudflare.com]
 ```
 
-覆盖：空访问、`/health`、OPTIONS、RFC8484 GET / POST、ECH 改写、415、404。
+覆盖：空访问、`/health`、OPTIONS、RFC8484 GET / POST、ECH 改写、415、404。ECH 改写测试需要与线上一致的路径，未设置时显示为跳过：
+
+```bash
+ECH_PATH=<你的路径> node scripts/test-doh.js https://doh.example.com/dns-query example.com
+```
+
+`RL` 绑定调用异常时会放行请求（优先保证可用性）。
 
 手动查看改写结果：
 
