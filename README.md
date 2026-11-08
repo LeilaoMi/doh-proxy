@@ -31,7 +31,7 @@ https://doh.leilaomi.ccwu.cc/ech         # 浏览器（ECH_PATH 可改）
 
 `/ech` 端点对每个 A / AAAA / HTTPS 查询：
 
-1. 先向上游查 A 记录，地址落在 Cloudflare 公布网段内即判定为 CF 站点（也可用 `ECH_FORCE` / `ECH_EXCLUDE` 手动指定）。
+1. 先向上游查 A 记录，地址落在 Cloudflare 公布网段内即判定为 CF 站点；没有 A 记录时再看 AAAA（也可用 `ECH_FORCE` / `ECH_EXCLUDE` 手动指定）。不用 SOA/NS 判定：CF 托管的域名里可能有未开代理（灰云）的记录，按 SOA 改写会把这类站点解析坏。
 2. 非 CF 站点：原样转发。
 3. CF 站点：
    - **HTTPS**：合成 `1 . alpn=h3,h2 ipv4hint=<优选> ech=<CF 当前 ECHConfig>`。ECHConfig 从 `cloudflare-ech.com` 的 HTTPS 记录自动获取并缓存 30 分钟（CF 约每小时轮换，旧配置仍有效数小时）。
@@ -56,6 +56,7 @@ Cloudflare 边缘对所有 CF 站点都接受 ECH，即使站点面板里关了 
 | `DOH_UPSTREAM` / `DOH` | `cloudflare-dns.com` | 上游 DoH |
 | `ECH_PATH` | `/ech` | ECH 端点路径，建议改成不易猜到的路径，避免被当公共 DoH 滥用 |
 | `ECH_ALPN` | `h3,h2` | 注入的 alpn |
+| `ECH_ALPN_BY_ISP` | `ct:h3,h2;cu:h3,h2;cm:h2` | 带 `?isp=` 时按运营商覆盖 alpn。Worker 发不了 UDP，无法实测 QUIC，所以是静态开关 |
 | `ECH_SOURCE` | `cloudflare-ech.com` | 从哪个域名获取 ECHConfig |
 | `ECH_CONFIG` | 空 | 固定 ECHConfig（base64），设置后不再自动获取 |
 | `ECH_FORCE` | 空 | 强制按 CF 处理的域名后缀，逗号分隔（需配合优选 IP） |

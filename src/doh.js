@@ -328,7 +328,23 @@ async function classify(env, ctx, origin, name, ecs) {
   if (matchSuffix(name, list(env?.ECH_FORCE))) return { cf: true, forced: true };
   const msg = parseMessage(await upstreamQuery(env, ctx, origin, name, TYPE.A, ecs));
   const ips = msg.answers.filter((r) => r.type === TYPE.A).map((r) => rdataA(r.rdata));
-  return { cf: ips.length > 0 && ips.some(isCfV4), ips };
+  if (ips.length) return { cf: ips.some(isCfV4), ips };
+  // IPv6-only names: fall back to AAAA. (SOA/NS is deliberately NOT used: a Cloudflare zone
+  // can hold DNS-only records that are not proxied, and rewriting those would break the site.)
+  const m6 = parseMessage(await upstreamQuery(env, ctx, origin, name, TYPE.AAAA, ecs));
+  const ips6 = m6.answers.filter((r) => r.type === TYPE.AAAA).map((r) => rdataAAAA(r.rdata));
+  return { cf: ips6.length > 0 && ips6.some(isCfV6), ips: [] };
+}
+
+// ECH_ALPN_BY_ISP="ct:h3,h2;cu:h3,h2;cm:h2" -> per-carrier alpn when ?isp= is given.
+// Workers cannot send UDP, so QUIC reachability cannot be probed here; this is a static per-carrier switch.
+function alpnForIsp(env, isp) {
+  if (!isp || !env?.ECH_ALPN_BY_ISP) return null;
+  for (const part of String(env.ECH_ALPN_BY_ISP).split(";")) {
+    const [k, v] = part.split(":");
+    if (k && v && k.trim().toLowerCase() === isp) return v;
+  }
+  return null;
 }
 
 function httpsRdata({ alpn, v4, v6, ech }) {
@@ -369,7 +385,7 @@ async function echResolve(env, ctx, origin, reqMsg, opts, ecs) {
   }
   // HTTPS
   const ech = await getEchConfig(env, ctx, origin);
-  const alpn = (opts.alpn ?? list(env?.ECH_ALPN || DEFAULT_ALPN)).filter((a) => /^(h3|h2|http\/1\.1)$/.test(a));
+  const alpn = (opts.alpn ?? list(alpnForIsp(env, opts.isp) || env?.ECH_ALPN || DEFAULT_ALPN)).filter((a) => /^(h3|h2|http\/1\.1)$/.test(a));
   const v4 = pref.v4.length ? pref.v4 : [];
   const v6 = opts.no6 ? [] : pref.v6;
   const rdata = httpsRdata({ alpn, v4, v6, ech });
