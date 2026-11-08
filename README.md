@@ -113,13 +113,17 @@ wrangler secret put ECH_PATH   # 首次部署设置一次，例如 16 位随机�
 wrangler deploy                # 通用配置，部署到 workers.dev
 ```
 
+> 注意：通用配置的 Worker 名也是 `doh-proxy`。账号里已有按生产配置部署的同名 Worker 时，`wrangler deploy` 会覆盖它（打开公开的 workers.dev 地址、去掉 `BESTIP` 绑定）。已上线的生产环境只用 `wrangler deploy -c wrangler.prod.toml`；想并行测试，先把 `wrangler.toml` 的 `name` 改成别的，例如 `doh-proxy-test`。
+
 ### 绑定自己的域名和优选池
 
 `wrangler.toml` 是通用配置，fork 后不用改就能部署。个人配置单独放：
 
 ```bash
 cp wrangler.prod.example.toml wrangler.prod.toml   # 已 gitignore，不会提交
-# 改 routes 里的域名；没有 cf-best-ip 就删掉 [[services]] 和 BEST_IP_URL
+# 必改：routes 里的域名
+# 必改：BEST_IP_URL 的 host 换成 cf-best-ip 的 ALLOWED_HOSTS 里允许的域名，否则优选池请求被拒、回退上游 IP
+# 没有 cf-best-ip：删掉 [[services]] 和 BEST_IP_URL
 wrangler deploy -c wrangler.prod.toml
 ```
 
