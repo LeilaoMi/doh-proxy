@@ -1,16 +1,10 @@
 name = "doh-proxy"
 main = "worker.js"
 compatibility_date = "2026-05-30"
-# 线上已关闭 workers.dev（国内 SNI 被封），保持一致，避免部署时被重新打开
-workers_dev = false
-routes = [
-  { pattern = "doh.leilaomi.ccwu.cc", custom_domain = true }
-]
-
-# 优选 IP 池：通过 Service Binding 直接调用同账号的 cf-best-ip Worker（不走公网、不受 Worker 互访限制）
-[[services]]
-binding = "BESTIP"
-service = "cf-best-ip"
+# 通用配置：fork 后可直接 `wrangler deploy`，部署到 workers.dev。
+# 自定义域名、优选池等个人配置放到 wrangler.prod.toml（已 gitignore），
+# 参考 wrangler.prod.example.toml，用 `wrangler deploy -c wrangler.prod.toml` 部署。
+workers_dev = true
 
 # 按客户端 IP 限速，防止被当公共 DoH 刷配额（浏览器 DoH 会并发查询，阈值不宜太低）
 [[ratelimits]]
@@ -28,8 +22,8 @@ ECH_ALPN = "h3,h2"
 ECH_ALPN_BY_ISP = "ct:h3,h2;cu:h3,h2;cm:h2"
 ECH_SOURCE = "cloudflare-ech.com"
 MAX_IPS = "4"
-# 优选池地址；有 BESTIP 绑定时走绑定，但 host 必须是 cf-best-ip 的 ALLOWED_HOSTS
-BEST_IP_URL = "https://bestip.leilaomi.cc.cd/api/ips?limit=60"
+# 优选 IP：可选。设 BEST_IPV4 / BEST_IPV6，或 BEST_IP_URL 指向 cf-best-ip 的 /api/ips
+# BEST_IPV4 = "104.16.0.1,172.64.0.1"
 # ECS 仅对支持 ECS 的上游（如 dns.google）有意义；默认上游 1.1.1.1 不使用 ECS
 ECS = "off"
 CACHE = "on"

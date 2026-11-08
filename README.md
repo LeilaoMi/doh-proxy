@@ -7,10 +7,11 @@
 | `/dns-query` | v2rayNG / Karing / sing-box 等代理客户端 | 纯净转发上游，不改写 |
 | `/<ECH_PATH>`（默认关闭） | Chrome / Edge / Firefox 浏览器「安全 DNS」 | 对 Cloudflare 托管站点改写应答，实现 **ECH 直连** |
 
-当前线上端点（ECH 端点路径为私有 secret，不写在这里）：
+部署后的端点形如（ECH 端点路径为私有 secret）：
 
 ```text
-https://doh.leilaomi.ccwu.cc/dns-query   # 代理客户端
+https://doh.example.com/dns-query        # 代理客户端
+https://doh.example.com/<ECH_PATH>       # 浏览器
 ```
 
 ## 功能
@@ -107,12 +108,22 @@ https://doh.example.com/<ECH_PATH>?no6=1           # 不返回 IPv6
 
 ```bash
 npm install -g wrangler
-wrangler login            # 或设置 CLOUDFLARE_API_TOKEN
-wrangler secret put ECH_PATH   # 首次部署设置一次
-wrangler deploy
+wrangler login                 # 或设置 CLOUDFLARE_API_TOKEN
+wrangler secret put ECH_PATH   # 首次部署设置一次，例如 16 位随机串
+wrangler deploy                # 通用配置，部署到 workers.dev
 ```
 
-`wrangler.toml` 已设 `workers_dev = false` 并绑定自定义域名 `doh.leilaomi.ccwu.cc`。
+### 绑定自己的域名和优选池
+
+`wrangler.toml` 是通用配置，fork 后不用改就能部署。个人配置单独放：
+
+```bash
+cp wrangler.prod.example.toml wrangler.prod.toml   # 已 gitignore，不会提交
+# 改 routes 里的域名；没有 cf-best-ip 就删掉 [[services]] 和 BEST_IP_URL
+wrangler deploy -c wrangler.prod.toml
+```
+
+`wrangler.prod.example.toml` 关闭了 workers.dev（国内常被 SNI 阻断），并带上 `BESTIP` 绑定和 `RL` 限速。
 
 ### Pages Functions（可选）
 

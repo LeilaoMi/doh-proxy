@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
-const endpoint = (process.argv[2] || "https://doh.leilaomi.ccwu.cc/dns-query").replace(/\/+$/, "");
+if (!process.argv[2]) {
+  console.error("用法: node scripts/test-doh.js https://你的域名/dns-query [测试域名] [CF站点]");
+  process.exit(2);
+}
+const endpoint = process.argv[2].replace(/\/+$/, "");
 const domain = process.argv[3] || "example.com";
 // 可选第 3 个参数：用于 ECH 改写测试的 CF 站点，默认 crypto.cloudflare.com
 const baseUrl = endpoint.replace(/\/dns-query$/, "");
