@@ -3,14 +3,17 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { selectPoolIps, poolRequestUrl, getPreferredIps, handle, parseMessage, _resetMemo } from "../src/doh.js";
 
+/** Build a pool row; `ech` is omitted entirely when undefined (old pool API). */
 const row = (ip, carrier, ech, family = ip.includes(":") ? "v6" : "v4") => {
   const r = { ip, port: 443, carrier, family, delay: 50 };
   if (ech !== undefined) r.ech = ech;
   return r;
 };
 
+/** Request options as requestOptions() would produce them. */
 const opts = (extra = {}) => ({ ip4: [], ip6: [], isp: null, ...extra });
 
+/** Env with a mocked BESTIP binding serving `rows`; `seen` records requested URLs. */
 function mockEnv(rows, extra = {}) {
   const seen = [];
   return {
@@ -141,6 +144,7 @@ test("poolRequestUrl: default, override, top removed, existing ech kept", () => 
 
 // ---------- end to end through handle(): A answer with the pool filtered / falling back ----------
 const UPSTREAM_IP = [104, 21, 1, 1]; // a Cloudflare address for the test name
+/** Minimal upstream DoH answer: echoes the question, adds one A record for A queries. */
 function fakeUpstream(query) {
   const q = new Uint8Array(query);
   const msg = parseMessage(q);
@@ -157,6 +161,7 @@ function fakeUpstream(query) {
   return new Uint8Array(out);
 }
 
+/** Resolve www.example.com/A through handle() with a mocked upstream and pool; returns A data. */
 async function resolveA(poolRows, query = "isp=cu") {
   _resetMemo();
   const realFetch = globalThis.fetch;

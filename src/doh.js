@@ -222,7 +222,7 @@ function ecsOption(clientIp) {
 
 // ---------- upstream + cache ----------
 const memo = new Map(); // small per-isolate cache for ECH config / IP pool
-// Test hook: clear the per-isolate cache.
+/** Test hook: clear the per-isolate cache (ECH config, IP pool). */
 export function _resetMemo() { memo.clear(); }
 
 function cacheTtl(msg) {
@@ -312,7 +312,17 @@ async function getEchConfig(env, ctx, origin) {
 }
 
 // ---------- preferred IP pool ----------
-export async function getPreferredIps(env, opts, need = { v4: true, v6: true }) {
+const NEED_BOTH = Object.freeze({ v4: true, v6: true });
+/**
+ * Preferred IPs per address family. Manual sources win and are used as-is (no ECH filtering):
+ * ?ip4=/?ip6= > BEST_IPV4_<ISP>/BEST_IPV6_<ISP> (with ?isp=) > BEST_IPV4/BEST_IPV6. Families still
+ * empty (and needed) come from the pool via selectPoolIps. An empty family means "use upstream IPs".
+ * @param {object} env Worker env
+ * @param {{ip4: string[], ip6: string[], isp: string|null}} opts request options
+ * @param {{v4: boolean, v6: boolean}} [need] which families this answer needs
+ * @returns {Promise<{v4: string[], v6: string[]}>}
+ */
+export async function getPreferredIps(env, opts, need = NEED_BOTH) {
   const max = Math.max(1, Math.min(8, +(env?.MAX_IPS || DEFAULT_MAX_IPS)));
   // Per address family: ?ip4=/?ip6= > BEST_IPV4_<ISP>/BEST_IPV6_<ISP> (with ?isp=) > BEST_IPV4/BEST_IPV6 > pool.
   const fixed = (fam, valid) => {
@@ -334,16 +344,21 @@ export async function getPreferredIps(env, opts, need = { v4: true, v6: true }) 
   return { v4: v4.filter(isV4).slice(0, max), v6: v6.filter(isV6).slice(0, max) };
 }
 
-// Pick pool IPs for one address family, skipping IPs whose row says `ech: false`
-// (ECH through them fails with Cloudflare error 1034). Tiers, each keeping the pool's order:
-//   1. carrier matches ?isp= and ech === true
-//   2. any other row (no carrier / other carrier) and ech === true
-//   3. carrier matches and ech unknown (null / missing, e.g. an older pool API)
-//   4. any other row and ech unknown
-// Tiers are concatenated and cut to `max`. An IP with any `ech: false` row in this family is
-// dropped entirely. Without ?isp= every row counts as "carrier matches", so the order is simply
-// ech === true first, then unknown. An empty result means "no rewrite": callers fall back to the
-// upstream answer's own IPs.
+/**
+ * Pick pool IPs for one address family, skipping IPs whose row says `ech: false`
+ * (ECH through them fails with Cloudflare error 1034). Tiers, each keeping the pool's order:
+ *   1. carrier matches ?isp= and ech === true
+ *   2. any other row (no carrier / other carrier) and ech === true
+ *   3. carrier matches and ech unknown (null / missing, e.g. an older pool API)
+ *   4. any other row and ech unknown
+ * Tiers are concatenated and cut to `max`. An IP with any `ech: false` row in this family is
+ * dropped entirely. Without ?isp= every row counts as "carrier matches", so the order is simply
+ * ech === true first, then unknown. An empty result means "no rewrite": callers fall back to the
+ * upstream answer's own IPs.
+ * @param {Array<{ip: string, family: string, carrier?: string|null, ech?: boolean|null}>} pool
+ * @param {{family: "v4"|"v6", isp?: string|null, max?: number}} options
+ * @returns {string[]} unique IPs, best first
+ */
 export function selectPoolIps(pool, { family, isp = null, max = DEFAULT_MAX_IPS } = {}) {
   const rows = (Array.isArray(pool) ? pool : []).filter((r) => r && r.ip && r.family === family);
   const bad = new Set(rows.filter((r) => r.ech === false).map((r) => r.ip));
@@ -357,9 +372,15 @@ export function selectPoolIps(pool, { family, isp = null, max = DEFAULT_MAX_IPS 
   return [...new Set(tiers.flat())].slice(0, Math.max(0, max));
 }
 
-// Pool request URL: always ask for POOL_LIMIT rows (default 200, the cf-best-ip maximum) so that
-// enough ECH-capable IPs survive filtering per carrier, and add ech=1 so newer pool APIs drop
-// known-bad IPs server-side (older APIs ignore it; the client-side filter above still applies).
+/**
+ * Pool request URL: always ask for POOL_LIMIT rows (default 200, the cf-best-ip maximum) so that
+ * enough ECH-capable IPs survive filtering per carrier, and add ech=1 so newer pool APIs drop
+ * known-bad IPs server-side (older APIs ignore it; selectPoolIps still filters client-side).
+ * An explicit `ech` already in BEST_IP_URL is kept; `top` is removed because cf-best-ip reads it
+ * before `limit`.
+ * @param {object} env Worker env (BEST_IP_URL, POOL_LIMIT)
+ * @returns {string}
+ */
 export function poolRequestUrl(env) {
   const url = new URL(String(env?.BEST_IP_URL || DEFAULT_POOL_URL));
   const n = Math.floor(Number(env?.POOL_LIMIT));
@@ -370,6 +391,12 @@ export function poolRequestUrl(env) {
   return url.toString();
 }
 
+/**
+ * Fetch the preferred-IP pool (Service Binding BESTIP, else public BEST_IP_URL), dropping rows
+ * with `tested: false`. Cached per isolate for 10 minutes; throws on HTTP errors.
+ * @param {object} env Worker env
+ * @returns {Promise<object[]>} pool rows in the pool's own order
+ */
 async function loadPool(env) {
   const m = memo.get("pool");
   if (m && m.exp > Date.now()) return m.val;
