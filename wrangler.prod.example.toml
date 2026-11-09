@@ -30,4 +30,5 @@ service = "cf-best-ip"
 
 [vars]
 # 必改：host 必须在 cf-best-ip 的 ALLOWED_HOSTS 里，否则请求被拒、回退上游 IP
-BEST_IP_URL = "https://bestip.example.com/api/ips?limit=60"
+# limit / ech 参数由代码自动补成 limit=200&ech=1（条数可用 POOL_LIMIT 改）
+BEST_IP_URL = "https://bestip.example.com/api/ips"
