@@ -1,9 +1,11 @@
 # doh-proxy 与 cmliu/CF-Workers-DoH 对比结论
 
+> 注：文中自用域名已替换为 `example.com` 占位（如 `doh.example.com`），按自己的部署替换。
+
 生成时间：2026-06-05（Asia/Shanghai）
 用户项目：`https://github.com/LeilaoMi/doh-proxy`
 对比项目：`https://github.com/cmliu/CF-Workers-DoH`
-线上端点：`https://doh.leilaomi.ccwu.cc/dns-query`
+线上端点：`https://doh.example.com/dns-query`
 
 ## 1. 直接结论
 
@@ -16,7 +18,7 @@
 1. 当前 CF 已部署服务继续保留。
 2. 不直接替换线上端点。
 3. 如果想要网页查询页面、IP 信息查询、主页伪装等功能，可以从 `cmliu` 项目按需“移植小模块”，不要整仓库替换。
-4. 真要试新版，也应该部署到新的测试子域名，例如 `doh-test.leilaomi.ccwu.cc`，验证稳定后再考虑切换。
+4. 真要试新版，也应该部署到新的测试子域名，例如 `doh-test.example.com`，验证稳定后再考虑切换。
 
 ## 2. 当前项目状态
 
@@ -46,7 +48,7 @@ main = "worker.js"
 compatibility_date = "2026-05-30"
 workers_dev = true
 routes = [
-  { pattern = "doh.leilaomi.ccwu.cc", custom_domain = true }
+  { pattern = "doh.example.com", custom_domain = true }
 ]
 ```
 
@@ -55,13 +57,13 @@ routes = [
 执行命令：
 
 ```bash
-node scripts/test-doh.js https://doh.leilaomi.ccwu.cc/dns-query example.com
+node scripts/test-doh.js https://doh.example.com/dns-query example.com
 ```
 
 输出：
 
 ```text
-Endpoint: https://doh.leilaomi.ccwu.cc/dns-query
+Endpoint: https://doh.example.com/dns-query
 Domain:   example.com
 ----------------------------------------
 ✅ health         128.8ms  status=200 type=text/plain; charset=utf-8 answers=- rcode=-
@@ -123,7 +125,7 @@ node --check scripts/test-doh.js
 
 ### 6.1 你的线上端点已经可用
 
-当前 `https://doh.leilaomi.ccwu.cc/dns-query` 已通过：
+当前 `https://doh.example.com/dns-query` 已通过：
 
 - health
 - OPTIONS
@@ -180,7 +182,7 @@ GET /dns-query 空访问返回 200 ok
 动作：
 
 - 不换项目。
-- 保留 `doh.leilaomi.ccwu.cc/dns-query`。
+- 保留 `doh.example.com/dns-query`。
 - 定期用 `scripts/test-doh.js` 验证。
 - 如要换上游，只改 Cloudflare 环境变量 `DOH_UPSTREAM`。
 
@@ -191,12 +193,12 @@ GET /dns-query 空访问返回 200 ok
 建议子域：
 
 ```text
-doh-test.leilaomi.ccwu.cc
+doh-test.example.com
 ```
 
 动作：
 
-- 不动现有 `doh.leilaomi.ccwu.cc`。
+- 不动现有 `doh.example.com`。
 - 用 `cmliu/CF-Workers-DoH` 或移植模块部署到测试 Worker。
 - 验证 1-2 天。
 - 确认可用后再决定是否迁移。
@@ -222,7 +224,7 @@ doh-test.leilaomi.ccwu.cc
    - `node --check worker.js`
    - `node --check functions/dns-query.js`
    - `node --check scripts/test-doh.js`
-   - `node scripts/test-doh.js https://doh.leilaomi.ccwu.cc/dns-query example.com`
+   - `node scripts/test-doh.js https://doh.example.com/dns-query example.com`
 
 ## 10. 最终建议
 
