@@ -85,6 +85,7 @@ Cloudflare 边缘对所有 CF 站点都接受 ECH，即使站点面板里关了 
 | `BEST_IPV4_CT` / `_CU` / `_CM`（IPv6 同理） | 空 | 按运营商的固定优选 IP，带 `?isp=` 时优先使用 |
 | `BEST_IP_URL` | 空 | 优选池地址，格式见「优选 IP」。有 `BESTIP` 绑定时也用它的 host |
 | `MAX_IPS` | `4` | 每个地址族最多返回几个 IP（1–8） |
+| `POOL_LIMIT` | `200` | 每次向优选池请求的条数（1–1000，cf-best-ip 最多返回 200） |
 | `ECS` | `off` | 开启后把客户端 IP 的 /24（IPv6 /56）写入 EDNS。默认上游 1.1.1.1 不使用 ECS，配合 `dns.google` 才有意义 |
 | `CACHE` | `on` | 按 TTL 缓存上游应答 |
 
@@ -98,12 +99,25 @@ Cloudflare 边缘对所有 CF 站点都接受 ECH，即使站点面板里关了 
 
 ```json
 { "ips": [
-  { "ip": "104.16.1.1", "family": "v4", "carrier": "ct" },
+  { "ip": "104.16.1.1", "family": "v4", "carrier": "ct", "ech": true },
+  { "ip": "104.16.1.2", "family": "v4", "carrier": "cu", "ech": false },
   { "ip": "2606:4700::1", "family": "v6", "carrier": "cm", "tested": true }
 ] }
 ```
 
-`family` 必填（`v4` / `v6`）；`carrier` 可选（`ct` / `cu` / `cm`），带 `?isp=` 时据此筛选，筛不到就用全部；`tested: false` 的条目会被忽略。池结果缓存 10 分钟，请求失败时回退上游 IP。
+`family` 必填（`v4` / `v6`）；`carrier` 可选（`ct` / `cu` / `cm`，大小写不限）；`tested: false` 的条目会被忽略。
+
+`ech` 可选：`true` 表示带 ECH 访问正常，`false` 表示带 ECH 会报 Cloudflare 1034（部分 CF IP 如此），`null` 或缺省表示未知（旧版池接口没有这个字段）。选 IP 时 `ech: false` 的 IP 一律剔除（同一 IP 任一行为 `false` 即剔除），其余按以下顺序分层拼接，每层内部保持池子原有顺序（延迟/评分），去重后取前 `MAX_IPS` 个。带 `?isp=` 时：
+
+1. 运营商匹配 `?isp=` 且 `ech: true`
+2. 无运营商标（`carrier` 为空 / `null` / 缺省）且 `ech: true`
+3. 运营商匹配且 `ech` 未知
+4. 无运营商标且 `ech` 未知
+5. 标了其他运营商的条目（`ech: true` 在前，未知在后），仅作最后补位：它们是在别的运营商网络上测出来的，通常不如本运营商或通用 IP
+
+不带 `?isp=` 时忽略运营商标，即 `ech: true` 在前、未知在后。全部被剔除时不改写，回退上游原始 IP（HTTPS 记录不带 ipv4hint/ipv6hint）。IPv4、IPv6 分别计算。旧版池接口（没有 `ech` 字段）：本运营商的 IP 在前，不足 `MAX_IPS` 时先用无运营商标的补齐，最后才用其他运营商的。手动配置的 IP（`?ip4=`、`BEST_IPV4*` 等）不做 ECH 过滤。
+
+请求池子时总会带上 `limit=200`（可用 `POOL_LIMIT` 改，`BEST_IP_URL` 里原有的 `limit` / `top` 会被替换），让过滤后每个运营商仍有足够的可用 IP；并附加 `ech=1`，支持该参数的池接口会在服务端先排除 `ech: false`，不支持的接口会忽略它，客户端过滤照常生效。池结果缓存 10 分钟，请求失败时回退上游 IP。
 
 优先级（IPv4、IPv6 各自独立判断）：`?ip4=` / `?ip6=` > `BEST_IPV4_<运营商>` > `BEST_IPV4` > 优选池 > 上游原 IP。格式不对的 IP 会被忽略，不会挡住下一级。
 
@@ -177,6 +191,14 @@ Pages 没有 `RL` 限速绑定，`/dns-query` 不受限速保护；需要限速�
 `functions/[[path]].js` 把所有请求交给 `src/doh.js`，所以私有 `ECH_PATH` 在 Pages 上同样可用；优选 IP 用固定列表或 `BEST_IP_URL`。
 
 ## 测试
+
+本地单元测试（Node 22+，无依赖，不联网）：优选池的 ECH 过滤、运营商分层顺序（其他运营商最后补位）、全部不可用时回退上游 IP、旧接口兼容、手动 IP 不过滤。
+
+```bash
+node --test test/*.test.mjs
+```
+
+线上端到端测试：
 
 ```bash
 node scripts/test-doh.js https://doh.example.com/dns-query example.com [CF站点，默认 crypto.cloudflare.com]
