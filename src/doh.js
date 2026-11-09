@@ -346,15 +346,17 @@ export async function getPreferredIps(env, opts, need = NEED_BOTH) {
 
 /**
  * Pick pool IPs for one address family, skipping IPs whose row says `ech: false`
- * (ECH through them fails with Cloudflare error 1034). Tiers, each keeping the pool's order:
+ * (ECH through them fails with Cloudflare error 1034). With ?isp= the tiers are, each keeping
+ * the pool's order:
  *   1. carrier matches ?isp= and ech === true
- *   2. any other row (no carrier / other carrier) and ech === true
- *   3. carrier matches and ech unknown (null / missing, e.g. an older pool API)
- *   4. any other row and ech unknown
- * Tiers are concatenated and cut to `max`. An IP with any `ech: false` row in this family is
- * dropped entirely. Without ?isp= every row counts as "carrier matches", so the order is simply
- * ech === true first, then unknown. An empty result means "no rewrite": callers fall back to the
- * upstream answer's own IPs.
+ *   2. no carrier tag (empty / null / missing) and ech === true
+ *   3. carrier matches and ech unknown (null / missing / non-boolean, e.g. an older pool API)
+ *   4. no carrier tag and ech unknown
+ *   5. tagged with another carrier: ech === true first, then unknown (last-resort filler, since
+ *      those IPs were measured on someone else's network)
+ * Tiers are concatenated, de-duplicated and cut to `max`. An IP with any `ech: false` row in this
+ * family is dropped entirely. Without ?isp= carrier tags are ignored: ech === true first, then
+ * unknown. An empty result means "no rewrite": callers fall back to the upstream answer's own IPs.
  * @param {Array<{ip: string, family: string, carrier?: string|null, ech?: boolean|null}>} pool
  * @param {{family: "v4"|"v6", isp?: string|null, max?: number}} options
  * @returns {string[]} unique IPs, best first
@@ -362,12 +364,19 @@ export async function getPreferredIps(env, opts, need = NEED_BOTH) {
 export function selectPoolIps(pool, { family, isp = null, max = DEFAULT_MAX_IPS } = {}) {
   const rows = (Array.isArray(pool) ? pool : []).filter((r) => r && r.ip && r.family === family);
   const bad = new Set(rows.filter((r) => r.ech === false).map((r) => r.ip));
-  const want = isp ? String(isp).toLowerCase() : null;
-  const tiers = [[], [], [], []];
+  const want = isp ? String(isp).trim().toLowerCase() : "";
+  // Tier index: [own+true, none+true, own+unknown, none+unknown, other+true, other+unknown].
+  // Without ?isp= every row counts as "own", so only tiers 0 and 2 are used.
+  const tiers = [[], [], [], [], [], []];
   for (const r of rows) {
     if (bad.has(r.ip)) continue;
-    const own = !want || String(r.carrier || "").toLowerCase() === want;
-    tiers[(r.ech === true ? 0 : 2) + (own ? 0 : 1)].push(r.ip);
+    const ok = r.ech === true;
+    const carrier = String(r.carrier ?? "").trim().toLowerCase();
+    let t;
+    if (!want || carrier === want) t = ok ? 0 : 2;
+    else if (!carrier) t = ok ? 1 : 3;
+    else t = ok ? 4 : 5;
+    tiers[t].push(r.ip);
   }
   return [...new Set(tiers.flat())].slice(0, Math.max(0, max));
 }

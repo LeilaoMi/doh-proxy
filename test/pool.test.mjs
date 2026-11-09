@@ -48,26 +48,63 @@ test("an IP is dropped if any of its rows says ech:false", () => {
   assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "ct", max: 4 }), ["104.16.0.2"]);
 });
 
-test("tier order: carrier+true > generic+true > carrier+unknown > generic+unknown", () => {
+test("tier order: own+true > untagged+true > own+unknown > untagged+unknown > other carrier", () => {
   const pool = [
-    row("104.16.0.1", null, null), // generic unknown
-    row("104.16.0.2", "CU", null), // carrier unknown
-    row("104.16.0.3", "CT", true), // generic (other carrier) true
-    row("104.16.0.4", "CU", true), // carrier true
-    row("104.16.0.5", null, true), // generic (no carrier) true
-    row("104.16.0.6", "CU"), // carrier, field missing
+    row("104.16.0.1", null, null), // untagged unknown
+    row("104.16.0.2", "CU", null), // own unknown
+    row("104.16.0.3", "CT", true), // other carrier true
+    row("104.16.0.4", "CU", true), // own true
+    row("104.16.0.5", null, true), // untagged true
+    row("104.16.0.6", "CU"), // own, field missing
     row("104.16.0.7", "CU", false),
+    row("104.16.0.8", "CM", null), // other carrier unknown
+    row("104.16.0.9", "", true), // empty carrier = untagged
   ];
   assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "cu", max: 8 }), [
     "104.16.0.4",
-    "104.16.0.3",
     "104.16.0.5",
+    "104.16.0.9",
     "104.16.0.2",
     "104.16.0.6",
     "104.16.0.1",
+    "104.16.0.3",
+    "104.16.0.8",
   ]);
   // Cut to max after ordering.
-  assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "cu", max: 2 }), ["104.16.0.4", "104.16.0.3"]);
+  assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "cu", max: 2 }), ["104.16.0.4", "104.16.0.5"]);
+});
+
+test("other-carrier ech:true ranks after own-carrier ech unknown", () => {
+  const pool = [row("104.16.0.1", "CM", true), row("104.16.0.2", "CT", true), row("104.16.0.3", "CU", null), row("104.16.0.4", "CU")];
+  assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "cu", max: 4 }), ["104.16.0.3", "104.16.0.4", "104.16.0.1", "104.16.0.2"]);
+  assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "cu", max: 2 }), ["104.16.0.3", "104.16.0.4"]);
+});
+
+test("untagged rows rank before own-carrier unknown only when ech:true", () => {
+  const pool = [row("104.16.0.1", null, null), row("104.16.0.2", "CU", null), row("104.16.0.3", undefined, true)];
+  // untagged+true (tier 2) > own+unknown (tier 3) > untagged+unknown (tier 4)
+  assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "cu", max: 4 }), ["104.16.0.3", "104.16.0.2", "104.16.0.1"]);
+});
+
+test("non-boolean ech values count as unknown", () => {
+  const pool = [row("104.16.0.1", "CU", "true"), row("104.16.0.2", "CU", 1), row("104.16.0.3", "CU", true)];
+  assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "cu", max: 4 }), ["104.16.0.3", "104.16.0.1", "104.16.0.2"]);
+});
+
+test("only other-carrier rows usable -> they still fill in (true first, then unknown)", () => {
+  const pool = [
+    row("104.16.0.1", "CU", false),
+    row("104.16.0.2", null, false),
+    row("104.16.0.3", "CT", null),
+    row("104.16.0.4", "CM", true),
+    row("104.16.0.5", "CT", true),
+  ];
+  assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "cu", max: 4 }), ["104.16.0.4", "104.16.0.5", "104.16.0.3"]);
+});
+
+test("duplicate IPs across tiers keep their best position", () => {
+  const pool = [row("104.16.0.1", "CT", true), row("104.16.0.2", "CU", null), row("104.16.0.1", "CU", true)];
+  assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "cu", max: 4 }), ["104.16.0.1", "104.16.0.2"]);
 });
 
 test("without ?isp= every row is the same tier: ech:true first, then unknown", () => {
@@ -91,12 +128,13 @@ test("all ech:false -> empty (caller falls back to upstream IPs)", async () => {
 
 test("old pool API without the ech field keeps the previous behaviour", () => {
   const pool = [row("104.16.0.1", "CT"), row("104.16.0.2", "CU"), row("104.16.0.3", "CU"), row("104.16.0.4"), row("2606:4700::1", "CU")];
-  // Carrier rows first, in pool order, as before.
+  // Carrier rows first, in pool order, as before; then untagged, then other carriers.
   assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "cu", max: 2 }), ["104.16.0.2", "104.16.0.3"]);
+  assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "cu", max: 4 }), ["104.16.0.2", "104.16.0.3", "104.16.0.4", "104.16.0.1"]);
   // No ?isp=: plain pool order.
   assert.deepEqual(selectPoolIps(pool, { family: "v4", max: 3 }), ["104.16.0.1", "104.16.0.2", "104.16.0.3"]);
-  // Carrier not in pool: use everything.
-  assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "cm", max: 4 }), ["104.16.0.1", "104.16.0.2", "104.16.0.3", "104.16.0.4"]);
+  // Carrier not in pool: untagged first, then other carriers in pool order.
+  assert.deepEqual(selectPoolIps(pool, { family: "v4", isp: "cm", max: 4 }), ["104.16.0.4", "104.16.0.1", "104.16.0.2", "104.16.0.3"]);
 });
 
 test("garbage input is tolerated", () => {
@@ -125,7 +163,8 @@ test("getPreferredIps uses the filtered pool and requests 200 rows with ech=1", 
   const pool = [row("104.16.0.1", "CU", false), row("104.16.0.2", "CU", null), row("104.16.0.3", "CT", true), row("2606:4700::1", "CU", true)];
   const { env, seen } = mockEnv(pool);
   const got = await getPreferredIps(env, opts({ isp: "cu" }), { v4: true, v6: true });
-  assert.deepEqual(got, { v4: ["104.16.0.3", "104.16.0.2"], v6: ["2606:4700::1"] });
+  // Own-carrier unknown (0.2) ranks before other-carrier ech:true (0.3).
+  assert.deepEqual(got, { v4: ["104.16.0.2", "104.16.0.3"], v6: ["2606:4700::1"] });
   assert.equal(seen.length, 1);
   const u = new URL(seen[0]);
   assert.equal(u.searchParams.get("limit"), "200");
@@ -179,6 +218,11 @@ async function resolveA(poolRows, query = "isp=cu") {
 test("handle(): bad IPs are skipped in the A answer", async () => {
   const got = await resolveA([row("104.16.0.1", "CU", false), row("104.16.0.2", "CU", true)]);
   assert.deepEqual(got, ["104.16.0.2"]);
+});
+
+test("handle(): with ?isp=cu, a CU unknown IP beats a CT ech:true IP in the A answer", async () => {
+  const got = await resolveA([row("104.16.0.1", "CT", true), row("104.16.0.2", "CU", null)]);
+  assert.deepEqual(got, ["104.16.0.2", "104.16.0.1"]);
 });
 
 test("handle(): all pool IPs ech:false -> upstream's own A record, not rewritten to a bad IP", async () => {
