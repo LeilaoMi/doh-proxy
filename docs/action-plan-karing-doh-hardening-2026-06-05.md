@@ -1,8 +1,10 @@
 # doh-proxy 后续改造执行计划
 
+> 注：文中自用域名已替换为 `example.com` 占位（如 `doh.example.com`），按自己的部署替换。
+
 生成时间：2026-06-05（Asia/Shanghai）
 项目路径：`/home/workspace/Projects/doh-proxy`
-当前线上端点：`https://doh.leilaomi.ccwu.cc/dns-query`
+当前线上端点：`https://doh.example.com/dns-query`
 
 ## 0. 总结论
 
@@ -54,7 +56,7 @@ Karing 推荐配置：
 - 119.29.29.29
 
 远程 DNS / 代理流量 DNS：
-- https://doh.leilaomi.ccwu.cc/dns-query
+- https://doh.example.com/dns-query
 
 不要把本项目 DoH 放进“代理服务器 DNS”，否则代理尚未建立前可能无法访问该 DoH，导致“代理服务器失败”。
 ```
@@ -211,7 +213,7 @@ POST /dns-query without application/dns-message → 415
 标准验证命令：
 
 ```bash
-node scripts/test-doh.js https://doh.leilaomi.ccwu.cc/dns-query example.com
+node scripts/test-doh.js https://doh.example.com/dns-query example.com
 ```
 
 如果新增 `/health`，可以扩展脚本自动从 endpoint 推导 base URL。
@@ -225,7 +227,7 @@ node scripts/test-doh.js https://doh.leilaomi.ccwu.cc/dns-query example.com
 正式端点继续保持：
 
 ```text
-https://doh.leilaomi.ccwu.cc/dns-query
+https://doh.example.com/dns-query
 ```
 
 ### 4.2 新增测试/备用子域
@@ -233,13 +235,13 @@ https://doh.leilaomi.ccwu.cc/dns-query
 推荐测试子域：
 
 ```text
-doh-test.leilaomi.ccwu.cc
+doh-test.example.com
 ```
 
 推荐备用子域：
 
 ```text
-doh2.leilaomi.ccwu.cc
+doh2.example.com
 ```
 
 用途：
@@ -274,7 +276,7 @@ Cloudflare Worker 第二服务 > Pages Functions > Deno Deploy > VPS
 
 ```text
 代理服务器 DNS：system / 1.1.1.1 / 8.8.8.8
-远程 DNS：https://doh.leilaomi.ccwu.cc/dns-query
+远程 DNS：https://doh.example.com/dns-query
 直连 DNS：223.5.5.5 / 119.29.29.29
 ```
 
@@ -284,7 +286,7 @@ Cloudflare Worker 第二服务 > Pages Functions > Deno Deploy > VPS
 
 ```text
 代理服务器 DNS：223.5.5.5 / 119.29.29.29 / system
-远程 DNS：https://doh.leilaomi.ccwu.cc/dns-query
+远程 DNS：https://doh.example.com/dns-query
 ```
 
 ### 5.3 如果经常出现“代理服务器失败”
@@ -293,7 +295,7 @@ Cloudflare Worker 第二服务 > Pages Functions > Deno Deploy > VPS
 
 ```text
 代理服务器 DNS：system
-远程 DNS：https://doh.leilaomi.ccwu.cc/dns-query
+远程 DNS：https://doh.example.com/dns-query
 ```
 
 不要第一时间改 Worker 代码。
@@ -372,7 +374,7 @@ README.md
 node --check worker.js
 node --check functions/dns-query.js
 node --check scripts/test-doh.js
-node scripts/test-doh.js https://doh.leilaomi.ccwu.cc/dns-query example.com
+node scripts/test-doh.js https://doh.example.com/dns-query example.com
 ```
 
 部署前不要动线上。
@@ -400,8 +402,8 @@ wrangler deploy
 部署后验证：
 
 ```bash
-node scripts/test-doh.js https://doh.leilaomi.ccwu.cc/dns-query example.com
-curl -i https://doh.leilaomi.ccwu.cc/health
+node scripts/test-doh.js https://doh.example.com/dns-query example.com
+curl -i https://doh.example.com/health
 ```
 
 ### 第五步：可选备用子域
