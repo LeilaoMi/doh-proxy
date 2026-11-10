@@ -33,3 +33,19 @@ test("default (no STEALTH) keeps public endpoints", async () => {
   assert.equal((await get("/", env)).status, 200);
   assert.equal((await get("/health", env)).status, 200);
 });
+
+test("stealth also hides public paths for OPTIONS", async () => {
+  const env = { STEALTH: "1", ECH_PATH: "secretpath" };
+  for (const p of ["/", "/health", "/dns-query"]) {
+    const r = await handle(new Request(BASE + p, { method: "OPTIONS" }), env, {});
+    assert.equal(r.status, 404, p);
+  }
+  const ok = await handle(new Request(`${BASE}/secretpath`, { method: "OPTIONS" }), env, {});
+  assert.equal(ok.status, 204);
+});
+
+test("stealth keeps ECH DoH routes", async () => {
+  const env = { STEALTH: "1", ECH_PATH: "secretpath" };
+  assert.equal((await get("/secretpath", env)).status, 200);
+  assert.equal((await get("/secretpath/resolve", env)).status, 400);
+});

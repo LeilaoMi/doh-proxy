@@ -50,6 +50,9 @@ export function getUpstream(env) {
 }
 const on = (v) => /^(1|on|true|yes)$/i.test(String(v ?? "").trim());
 const list = (v) => String(v ?? "").split(/[\s,]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+/** Paths hidden by STEALTH mode. */
+const PUBLIC_PATHS = new Set(["/", "/health", "/dns-query"]);
+
 /**
  * Whether stealth mode is on (env STEALTH = "1" | "true" | "yes" | "on").
  * Stealth only takes effect when ECH_PATH is also set, so a deployment can never lock itself out.
@@ -602,11 +605,12 @@ async function resolveJson(request, env, ctx, url) {
 
 export async function handle(request, env = {}, ctx = {}) {
   const url = new URL(request.url);
-  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
   const ePath = echPath(env);
-  // STEALTH=1 hides every well-known path ("/", "/health", "/dns-query") so active probes see a plain 404.
-  // Only <ECH_PATH>, <ECH_PATH>/resolve and <ECH_PATH>/health stay reachable.
+  // STEALTH=1 hides every well-known path ("/", "/health", "/dns-query") so active probes see a plain 404,
+  // whatever the method (OPTIONS included). Only <ECH_PATH>, <ECH_PATH>/resolve and <ECH_PATH>/health stay reachable.
   const stealth = isStealth(env) && Boolean(ePath);
+  if (stealth && PUBLIC_PATHS.has(url.pathname)) return new Response("Not Found", { status: 404, headers: textHeaders() });
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
   if (ePath && url.pathname === `${ePath}/health`) {
     return new Response(JSON.stringify({ status: "ok" }), { status: 200, headers: jsonHeaders() });
   }
@@ -616,7 +620,7 @@ export async function handle(request, env = {}, ctx = {}) {
       return new Response(JSON.stringify({ status: "ok", service: "doh-proxy", endpoint: "/dns-query" }), { status: 200, headers: jsonHeaders() });
     }
   }
-  const isDoh = (!stealth && url.pathname === "/dns-query") || (ePath && url.pathname === ePath);
+  const isDoh = url.pathname === "/dns-query" || (ePath && url.pathname === ePath);
   const isResolve = ePath && url.pathname === ePath + "/resolve" && request.method === "GET";
   if (!isDoh && !isResolve) return new Response("Not Found", { status: 404, headers: textHeaders() });
   // Optional per-IP rate limit (Workers Rate Limiting binding named RL).
