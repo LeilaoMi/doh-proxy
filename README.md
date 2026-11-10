@@ -18,7 +18,7 @@ https://doh.example.com/<ECH_PATH>       # 浏览器
 
 - 标准 RFC 8484 DoH：`GET ?dns=...` 与 `POST application/dns-message`。
 - `GET /dns-query` 空访问返回 `200 ok`，兼容 Karing 可用性检测。
-- `GET /health` 健康检查；`GET /<ECH_PATH>/resolve?name=&type=&mode=` 返回 JSON，手机浏览器上就能看改写结果。
+- `GET /health` 健康检查（隐身模式下改用 `GET /<ECH_PATH>/health`）；`GET /<ECH_PATH>/resolve?name=&type=&mode=` 返回 JSON，手机浏览器上就能看改写结果。
 - `/dns-query` 原样转发客户端报文（保留 EDNS、DO、CD 等），仅在开启 ECS 时重建查询。
 - 可选按 IP 限速（Workers Rate Limiting 绑定 `RL`，默认 600 次/分钟），超出返回 429。
 - **ECH 改写模式**（见下文）：注入 Cloudflare ECHConfig + alpn，A/AAAA 换成优选 IP，CNAME 展平。
@@ -228,3 +228,12 @@ curl "https://doh.example.com/<ECH_PATH>/resolve?name=www.google.com&type=A&mode
 - [dahisea/cloudflare-enech-dns-worker](https://github.com/dahisea/cloudflare-enech-dns-worker)：用 SOA 判定 CF 站点。
 
 本项目代码为独立实现，未复制上述项目代码。
+
+## 隐身模式（STEALTH）
+
+国内常见的封锁方式：主机名带 `doh`、`dns` 会被按 SNI 重置，公开的 `/dns-query` 会被主动探测，探测到后整个域名被封。建议：
+
+- 主机名用与 DNS 无关的名字，不要用 `doh.`、`dns.`。
+- 设置变量 `STEALTH=1`。开启后 `/`、`/health`、`/dns-query` 一律返回 404，只保留 `/<ECH_PATH>`、`/<ECH_PATH>/resolve` 和 `/<ECH_PATH>/health`。
+- 只有同时设置了 `ECH_PATH` 时 STEALTH 才生效，避免把自己锁在外面。
+- 开启后 `scripts/test-doh.js` 中针对 `/dns-query` 的检查会失败，属于预期行为。

@@ -50,6 +50,19 @@ export function getUpstream(env) {
 }
 const on = (v) => /^(1|on|true|yes)$/i.test(String(v ?? "").trim());
 const list = (v) => String(v ?? "").split(/[\s,]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+/** Paths hidden by STEALTH mode. */
+const PUBLIC_PATHS = new Set(["/", "/health", "/dns-query"]);
+
+/**
+ * Whether stealth mode is on (env STEALTH = "1" | "true" | "yes" | "on").
+ * Stealth only takes effect when ECH_PATH is also set, so a deployment can never lock itself out.
+ * @param {Record<string, unknown>} env
+ * @returns {boolean}
+ */
+export function isStealth(env) {
+  return ["1", "true", "yes", "on"].includes(String(env?.STEALTH ?? "").trim().toLowerCase());
+}
+
 // ECH endpoint is off unless ECH_PATH is set (keep it as a secret: `wrangler secret put ECH_PATH`).
 const echPath = (env) => {
   const p = String(env?.ECH_PATH || "").trim().replace(/^\/+/, "").replace(/\/+$/, "");
@@ -592,11 +605,20 @@ async function resolveJson(request, env, ctx, url) {
 
 export async function handle(request, env = {}, ctx = {}) {
   const url = new URL(request.url);
-  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
   const ePath = echPath(env);
-  if (url.pathname === "/") return new Response("DoH Proxy running. Endpoint: /dns-query", { status: 200, headers: textHeaders() });
-  if (url.pathname === "/health") {
-    return new Response(JSON.stringify({ status: "ok", service: "doh-proxy", endpoint: "/dns-query" }), { status: 200, headers: jsonHeaders() });
+  // STEALTH=1 hides every well-known path ("/", "/health", "/dns-query") so active probes see a plain 404,
+  // whatever the method (OPTIONS included). Only <ECH_PATH>, <ECH_PATH>/resolve and <ECH_PATH>/health stay reachable.
+  const stealth = isStealth(env) && Boolean(ePath);
+  if (stealth && PUBLIC_PATHS.has(url.pathname)) return new Response("Not Found", { status: 404, headers: textHeaders() });
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
+  if (ePath && url.pathname === `${ePath}/health`) {
+    return new Response(JSON.stringify({ status: "ok" }), { status: 200, headers: jsonHeaders() });
+  }
+  if (!stealth) {
+    if (url.pathname === "/") return new Response("DoH Proxy running. Endpoint: /dns-query", { status: 200, headers: textHeaders() });
+    if (url.pathname === "/health") {
+      return new Response(JSON.stringify({ status: "ok", service: "doh-proxy", endpoint: "/dns-query" }), { status: 200, headers: jsonHeaders() });
+    }
   }
   const isDoh = url.pathname === "/dns-query" || (ePath && url.pathname === ePath);
   const isResolve = ePath && url.pathname === ePath + "/resolve" && request.method === "GET";
