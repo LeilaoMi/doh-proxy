@@ -69,3 +69,28 @@ test("skipByCname: suffix match on the name or any target, custom list", () => {
   assert.equal(skipByCname({ ECH_SKIP_CNAME: "foo.net, bar.org" }, "a.example.com", ["z.bar.org"]), true);
   assert.equal(skipByCname({ ECH_SKIP_CNAME: "foo.net" }, "a.example.com", ["x.pacloudflare.com"]), false);
 });
+
+test("classification ignores ECS unless CLASSIFY_ECS=on", async () => {
+  _resetMemo();
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = async (_url, init) => {
+    const q = new Uint8Array(init.body);
+    sent.push(parseMessage(q).ar);
+    return new Response(fakeUpstream(init.body, null), { headers: { "content-type": "application/dns-message" } });
+  };
+  try {
+    const run = async (extra) => {
+      sent.length = 0;
+      _resetMemo();
+      const env = { ECH_PATH: "p", CACHE: "off", BEST_IPV4: POOL_IP, ECS: "on", ...extra };
+      const req = new Request("https://doh.example.com/p/resolve?name=www.example.com&type=A", { headers: { "cf-connecting-ip": "203.0.113.7" } });
+      await handle(req, env, {});
+      return [...sent];
+    };
+    assert.deepEqual(await run({}), [0], "classify query carries no OPT/ECS");
+    assert.deepEqual(await run({ CLASSIFY_ECS: "on" }), [1], "classify query carries ECS when opted in");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

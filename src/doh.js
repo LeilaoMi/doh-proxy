@@ -511,7 +511,10 @@ function httpsRdata({ alpn, v4, v6, ech }) {
 async function echResolve(env, ctx, origin, reqMsg, opts, ecs) {
   const q = reqMsg.questions[0];
   if (![TYPE.A, TYPE.AAAA, TYPE.HTTPS].includes(q.type)) return null;
-  const info = await classify(env, ctx, origin, q.name, ecs);
+  // Classify on the global (no-ECS) view by default: geo-DNS sites often hand Chinese subnets a
+  // non-Cloudflare CDN, which would silently turn ECH off for them. ECS still applies to
+  // pass-through answers, so domestic sites resolve to domestic nodes. CLASSIFY_ECS=on opts back in.
+  const info = await classify(env, ctx, origin, q.name, on(env?.CLASSIFY_ECS) ? ecs : null);
   if (!info.cf) return null;
 
   const pref = await getPreferredIps(env, opts, { v4: q.type !== TYPE.AAAA, v6: q.type !== TYPE.A && !opts.no6 });

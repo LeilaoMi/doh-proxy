@@ -87,6 +87,7 @@ Cloudflare 边缘对所有 CF 站点都接受 ECH，即使站点面板里关了 
 | `BEST_IP_URL` | 空 | 优选池地址，格式见「优选 IP」。有 `BESTIP` 绑定时也用它的 host |
 | `MAX_IPS` | `4` | 每个地址族最多返回几个 IP（1–8） |
 | `POOL_LIMIT` | `200` | 每次向优选池请求的条数（1–1000，cf-best-ip 最多返回 200） |
+| `CLASSIFY_ECS` | `off` | 判断是否为 CF 站点时是否带 ECS。默认不带，按全球视角判断：不少站点会给国内网段返回非 CF 的 CDN，带 ECS 判断会让这些站点失去 ECH。透传的应答仍然带 ECS |
 | `ECS` | `off` | 开启后把客户端 IP 的 /24（IPv6 /56）写入 EDNS。默认上游 1.1.1.1 不使用 ECS，配合 `dns.google` 才有意义。国内用户建议设为 `DOH_UPSTREAM=dns.google` 加 `ECS=on`，否则国内站会被解析到海外节点 |
 | `CACHE` | `on` | 按 TTL 缓存上游应答 |
 
