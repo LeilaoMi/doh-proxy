@@ -5,6 +5,9 @@ const DEFAULT_UPSTREAM = "cloudflare-dns.com";
 const DEFAULT_ECH_SOURCE = "cloudflare-ech.com";
 const DEFAULT_ALPN = "h3,h2";
 const DEFAULT_MAX_IPS = 4;
+// CNAME targets that sit on Cloudflare IPs but are not the HTTP reverse proxy (Spectrum), so ECH
+// through them fails. Matched as suffixes against every CNAME target in the upstream A answer.
+const DEFAULT_ECH_SKIP_CNAME = "pacloudflare.com";
 const DEFAULT_POOL_URL = "https://bestip.internal/api/ips";
 const DEFAULT_POOL_LIMIT = 200;
 // China Mobile throttles overseas UDP heavily, so it gets h2 only by default.
@@ -147,8 +150,8 @@ function encodeRR({ name, type, cls = 1, ttl, rdata }) {
   return [...encodeName(name), ...u16(type), ...u16(cls), ...u32(ttl), ...u16(rdata.length), ...rdata];
 }
 
-export function buildQuery(name, type, id = 0, extraAdditional = []) {
-  const bytes = [...u16(id), 0x01, 0x00, ...u16(1), 0, 0, 0, 0, ...u16(extraAdditional.length), ...encodeName(name), ...u16(type), 0, 1];
+export function buildQuery(name, type, id = 0, extraAdditional = [], { cd = false, qclass = 1 } = {}) {
+  const bytes = [...u16(id), 0x01, cd ? 0x10 : 0x00, ...u16(1), 0, 0, 0, 0, ...u16(extraAdditional.length), ...encodeName(name), ...u16(type), ...u16(qclass)];
   for (const rr of extraAdditional) bytes.push(...rr);
   return new Uint8Array(bytes);
 }
@@ -246,9 +249,17 @@ function cacheTtl(msg) {
   return Math.max(10, Math.min(300, Math.min(...ttls)));
 }
 
-async function upstreamQuery(env, ctx, origin, name, type, ecs) {
-  const q = buildQuery(name, type, 0, ecs ? [ecs.rr] : []);
-  const key = `${encodeURIComponent(name)}/${type}/${ecs ? encodeURIComponent(ecs.subnet) : "-"}`;
+/**
+ * Query the upstream for one name/type, optionally with our ECS OPT record.
+ * `flags` carries the client's CD bit, DO bit and query class for the ECS pass-through path, so a
+ * rebuilt query keeps DNSSEC semantics; they are part of the cache key.
+ * @param {{cd?: boolean, dnssecOk?: boolean, qclass?: number}} [flags]
+ */
+async function upstreamQuery(env, ctx, origin, name, type, ecs, { cd = false, dnssecOk = false, qclass = 1 } = {}) {
+  let opt = ecs ? ecs.rr : null;
+  if (opt && dnssecOk) { opt = opt.slice(); opt[7] |= 0x80; } // EDNS flags high byte: DO bit
+  const q = buildQuery(name, type, 0, opt ? [opt] : [], { cd, qclass });
+  const key = `${encodeURIComponent(name)}/${type}/${ecs ? encodeURIComponent(ecs.subnet) : "-"}/${qclass}${cd ? "/cd" : ""}${dnssecOk ? "/do" : ""}`;
   return upstreamRaw(env, ctx, origin, q, key);
 }
 
@@ -437,10 +448,38 @@ function matchSuffix(name, suffixes) {
   return suffixes.some((s) => name === s || name.endsWith("." + s));
 }
 
+/**
+ * CNAME targets in an answer section (names decompressed against the whole message).
+ * @param {Uint8Array} buf raw DNS message
+ * @param {ReturnType<typeof parseMessage>} msg parsed form of `buf`
+ * @returns {string[]} lower-case target names
+ */
+export function cnameTargets(buf, msg) {
+  return msg.answers.filter((r) => r.type === TYPE.CNAME).map((r) => readName(buf, r.rdataOffset).name);
+}
+
+/**
+ * Whether a name must not be rewritten because it, or a CNAME target on its chain, matches
+ * ECH_SKIP_CNAME (default: Cloudflare Spectrum's pacloudflare.com). Set ECH_SKIP_CNAME to "off"
+ * to disable the check.
+ * @param {object} env Worker env
+ * @param {string} name queried name
+ * @param {string[]} targets CNAME targets from the upstream answer
+ * @returns {boolean}
+ */
+export function skipByCname(env, name, targets) {
+  const raw = env?.ECH_SKIP_CNAME ?? DEFAULT_ECH_SKIP_CNAME;
+  if (/^(0|off|false|no)$/i.test(String(raw).trim())) return false;
+  const suffixes = list(raw);
+  return [name, ...targets].some((n) => matchSuffix(n, suffixes));
+}
+
 async function classify(env, ctx, origin, name, ecs) {
   if (matchSuffix(name, list(env?.ECH_EXCLUDE))) return { cf: false };
   if (matchSuffix(name, list(env?.ECH_FORCE))) return { cf: true, forced: true };
-  const msg = parseMessage(await upstreamQuery(env, ctx, origin, name, TYPE.A, ecs));
+  const buf = await upstreamQuery(env, ctx, origin, name, TYPE.A, ecs);
+  const msg = parseMessage(buf);
+  if (skipByCname(env, name, cnameTargets(buf, msg))) return { cf: false, skipped: "cname" };
   const ips = msg.answers.filter((r) => r.type === TYPE.A).map((r) => rdataA(r.rdata));
   if (ips.length) return { cf: ips.some(isCfV4), ips };
   // IPv6-only names: fall back to AAAA. (SOA/NS is deliberately NOT used: a Cloudflare zone
@@ -480,7 +519,10 @@ function httpsRdata({ alpn, v4, v6, ech }) {
 async function echResolve(env, ctx, origin, reqMsg, opts, ecs) {
   const q = reqMsg.questions[0];
   if (![TYPE.A, TYPE.AAAA, TYPE.HTTPS].includes(q.type)) return null;
-  const info = await classify(env, ctx, origin, q.name, ecs);
+  // Classify on the global (no-ECS) view by default: geo-DNS sites often hand Chinese subnets a
+  // non-Cloudflare CDN, which would silently turn ECH off for them. ECS still applies to
+  // pass-through answers, so domestic sites resolve to domestic nodes. CLASSIFY_ECS=on opts back in.
+  const info = await classify(env, ctx, origin, q.name, on(env?.CLASSIFY_ECS) ? ecs : null);
   if (!info.cf) return null;
 
   const pref = await getPreferredIps(env, opts, { v4: q.type !== TYPE.AAAA, v6: q.type !== TYPE.A && !opts.no6 });
@@ -532,8 +574,11 @@ async function resolveWire(env, ctx, url, request, query, ech) {
     }
   }
   // ECS needs the query rebuilt with our OPT record; otherwise forward the client's bytes untouched.
+  // Keep the client's CD bit, DO bit and class, so DNSSEC-validating clients get what they asked for.
+  const opt = reqMsg.additional.find((r) => r.type === TYPE.OPT);
+  const flags = { cd: (reqMsg.flags & 0x0010) !== 0, dnssecOk: !!opt && (opt.ttl & 0x8000) !== 0, qclass: q?.class || 1 };
   const buf = ecs && q && reqMsg.qd === 1
-    ? await upstreamQuery(env, ctx, url.origin, q.name, q.type, ecs)
+    ? await upstreamQuery(env, ctx, url.origin, q.name, q.type, ecs, flags)
     : await upstreamForward(env, ctx, url.origin, query);
   return { wire: withId(buf, reqMsg.id), rewritten: false };
 }
