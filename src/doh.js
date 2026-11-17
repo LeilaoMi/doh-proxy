@@ -5,6 +5,9 @@ const DEFAULT_UPSTREAM = "cloudflare-dns.com";
 const DEFAULT_ECH_SOURCE = "cloudflare-ech.com";
 const DEFAULT_ALPN = "h3,h2";
 const DEFAULT_MAX_IPS = 4;
+// CNAME targets that sit on Cloudflare IPs but are not the HTTP reverse proxy (Spectrum), so ECH
+// through them fails. Matched as suffixes against every CNAME target in the upstream A answer.
+const DEFAULT_ECH_SKIP_CNAME = "pacloudflare.com";
 const DEFAULT_POOL_URL = "https://bestip.internal/api/ips";
 const DEFAULT_POOL_LIMIT = 200;
 // China Mobile throttles overseas UDP heavily, so it gets h2 only by default.
@@ -437,10 +440,38 @@ function matchSuffix(name, suffixes) {
   return suffixes.some((s) => name === s || name.endsWith("." + s));
 }
 
+/**
+ * CNAME targets in an answer section (names decompressed against the whole message).
+ * @param {Uint8Array} buf raw DNS message
+ * @param {ReturnType<typeof parseMessage>} msg parsed form of `buf`
+ * @returns {string[]} lower-case target names
+ */
+export function cnameTargets(buf, msg) {
+  return msg.answers.filter((r) => r.type === TYPE.CNAME).map((r) => readName(buf, r.rdataOffset).name);
+}
+
+/**
+ * Whether a name must not be rewritten because it, or a CNAME target on its chain, matches
+ * ECH_SKIP_CNAME (default: Cloudflare Spectrum's pacloudflare.com). Set ECH_SKIP_CNAME to "off"
+ * to disable the check.
+ * @param {object} env Worker env
+ * @param {string} name queried name
+ * @param {string[]} targets CNAME targets from the upstream answer
+ * @returns {boolean}
+ */
+export function skipByCname(env, name, targets) {
+  const raw = env?.ECH_SKIP_CNAME ?? DEFAULT_ECH_SKIP_CNAME;
+  if (/^(0|off|false|no)$/i.test(String(raw).trim())) return false;
+  const suffixes = list(raw);
+  return [name, ...targets].some((n) => matchSuffix(n, suffixes));
+}
+
 async function classify(env, ctx, origin, name, ecs) {
   if (matchSuffix(name, list(env?.ECH_EXCLUDE))) return { cf: false };
   if (matchSuffix(name, list(env?.ECH_FORCE))) return { cf: true, forced: true };
-  const msg = parseMessage(await upstreamQuery(env, ctx, origin, name, TYPE.A, ecs));
+  const buf = await upstreamQuery(env, ctx, origin, name, TYPE.A, ecs);
+  const msg = parseMessage(buf);
+  if (skipByCname(env, name, cnameTargets(buf, msg))) return { cf: false, skipped: "cname" };
   const ips = msg.answers.filter((r) => r.type === TYPE.A).map((r) => rdataA(r.rdata));
   if (ips.length) return { cf: ips.some(isCfV4), ips };
   // IPv6-only names: fall back to AAAA. (SOA/NS is deliberately NOT used: a Cloudflare zone

@@ -51,7 +51,7 @@ https://doh.example.com/<ECH_PATH>       # 浏览器
 
 ECH 端点对每个 A / AAAA / HTTPS 查询：
 
-1. 先向上游查 A 记录，地址落在 Cloudflare 公布网段内即判定为 CF 站点；没有 A 记录时再看 AAAA（也可用 `ECH_FORCE` / `ECH_EXCLUDE` 手动指定）。不用 SOA/NS 判定：CF 托管的域名里可能有未开代理（灰云）的记录，按 SOA 改写会把这类站点解析坏。
+1. 先向上游查 A 记录，地址落在 Cloudflare 公布网段内即判定为 CF 站点；没有 A 记录时再看 AAAA（也可用 `ECH_FORCE` / `ECH_EXCLUDE` 手动指定）。域名本身或 CNAME 链命中 `ECH_SKIP_CNAME`（默认是 Spectrum 用的 `pacloudflare.com`）时不改写，原样透传。不用 SOA/NS 判定：CF 托管的域名里可能有未开代理（灰云）的记录，按 SOA 改写会把这类站点解析坏。
 2. 非 CF 站点：原样转发。
 3. CF 站点：
    - **HTTPS**：合成 `1 . alpn=h3,h2 ipv4hint=<优选> ech=<CF 当前 ECHConfig>`。ECHConfig 从 `cloudflare-ech.com` 的 HTTPS 记录自动获取并缓存 30 分钟（CF 约每小时轮换，旧配置仍有效数小时）。
@@ -81,12 +81,13 @@ Cloudflare 边缘对所有 CF 站点都接受 ECH，即使站点面板里关了 
 | `ECH_CONFIG` | 空 | 固定 ECHConfig（base64），设置后不再自动获取 |
 | `ECH_FORCE` | 空 | 强制按 CF 处理的域名后缀，逗号分隔（需配合优选 IP） |
 | `ECH_EXCLUDE` | 空 | 永不改写的域名后缀 |
+| `ECH_SKIP_CNAME` | `pacloudflare.com` | 域名本身或 CNAME 链命中这些后缀时不改写。默认值对应 Cloudflare Spectrum：它用的也是 CF 网段，但不是 HTTP 反代，不支持 ECH。填 `off` 关闭此项 |
 | `BEST_IPV4` / `BEST_IPV6` | 空 | 固定优选 IP，逗号分隔 |
 | `BEST_IPV4_CT` / `_CU` / `_CM`（IPv6 同理） | 空 | 按运营商的固定优选 IP，带 `?isp=` 时优先使用 |
 | `BEST_IP_URL` | 空 | 优选池地址，格式见「优选 IP」。有 `BESTIP` 绑定时也用它的 host |
 | `MAX_IPS` | `4` | 每个地址族最多返回几个 IP（1–8） |
 | `POOL_LIMIT` | `200` | 每次向优选池请求的条数（1–1000，cf-best-ip 最多返回 200） |
-| `ECS` | `off` | 开启后把客户端 IP 的 /24（IPv6 /56）写入 EDNS。默认上游 1.1.1.1 不使用 ECS，配合 `dns.google` 才有意义 |
+| `ECS` | `off` | 开启后把客户端 IP 的 /24（IPv6 /56）写入 EDNS。默认上游 1.1.1.1 不使用 ECS，配合 `dns.google` 才有意义。国内用户建议设为 `DOH_UPSTREAM=dns.google` 加 `ECS=on`，否则国内站会被解析到海外节点 |
 | `CACHE` | `on` | 按 TTL 缓存上游应答 |
 
 ## 优选 IP
