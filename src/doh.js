@@ -150,8 +150,8 @@ function encodeRR({ name, type, cls = 1, ttl, rdata }) {
   return [...encodeName(name), ...u16(type), ...u16(cls), ...u32(ttl), ...u16(rdata.length), ...rdata];
 }
 
-export function buildQuery(name, type, id = 0, extraAdditional = []) {
-  const bytes = [...u16(id), 0x01, 0x00, ...u16(1), 0, 0, 0, 0, ...u16(extraAdditional.length), ...encodeName(name), ...u16(type), 0, 1];
+export function buildQuery(name, type, id = 0, extraAdditional = [], { cd = false, qclass = 1 } = {}) {
+  const bytes = [...u16(id), 0x01, cd ? 0x10 : 0x00, ...u16(1), 0, 0, 0, 0, ...u16(extraAdditional.length), ...encodeName(name), ...u16(type), ...u16(qclass)];
   for (const rr of extraAdditional) bytes.push(...rr);
   return new Uint8Array(bytes);
 }
@@ -249,9 +249,17 @@ function cacheTtl(msg) {
   return Math.max(10, Math.min(300, Math.min(...ttls)));
 }
 
-async function upstreamQuery(env, ctx, origin, name, type, ecs) {
-  const q = buildQuery(name, type, 0, ecs ? [ecs.rr] : []);
-  const key = `${encodeURIComponent(name)}/${type}/${ecs ? encodeURIComponent(ecs.subnet) : "-"}`;
+/**
+ * Query the upstream for one name/type, optionally with our ECS OPT record.
+ * `flags` carries the client's CD bit, DO bit and query class for the ECS pass-through path, so a
+ * rebuilt query keeps DNSSEC semantics; they are part of the cache key.
+ * @param {{cd?: boolean, dnssecOk?: boolean, qclass?: number}} [flags]
+ */
+async function upstreamQuery(env, ctx, origin, name, type, ecs, { cd = false, dnssecOk = false, qclass = 1 } = {}) {
+  let opt = ecs ? ecs.rr : null;
+  if (opt && dnssecOk) { opt = opt.slice(); opt[7] |= 0x80; } // EDNS flags high byte: DO bit
+  const q = buildQuery(name, type, 0, opt ? [opt] : [], { cd, qclass });
+  const key = `${encodeURIComponent(name)}/${type}/${ecs ? encodeURIComponent(ecs.subnet) : "-"}/${qclass}${cd ? "/cd" : ""}${dnssecOk ? "/do" : ""}`;
   return upstreamRaw(env, ctx, origin, q, key);
 }
 
@@ -566,8 +574,11 @@ async function resolveWire(env, ctx, url, request, query, ech) {
     }
   }
   // ECS needs the query rebuilt with our OPT record; otherwise forward the client's bytes untouched.
+  // Keep the client's CD bit, DO bit and class, so DNSSEC-validating clients get what they asked for.
+  const opt = reqMsg.additional.find((r) => r.type === TYPE.OPT);
+  const flags = { cd: (reqMsg.flags & 0x0010) !== 0, dnssecOk: !!opt && (opt.ttl & 0x8000) !== 0, qclass: q?.class || 1 };
   const buf = ecs && q && reqMsg.qd === 1
-    ? await upstreamQuery(env, ctx, url.origin, q.name, q.type, ecs)
+    ? await upstreamQuery(env, ctx, url.origin, q.name, q.type, ecs, flags)
     : await upstreamForward(env, ctx, url.origin, query);
   return { wire: withId(buf, reqMsg.id), rewritten: false };
 }

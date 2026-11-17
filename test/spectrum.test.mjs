@@ -94,3 +94,37 @@ test("classification ignores ECS unless CLASSIFY_ECS=on", async () => {
     globalThis.fetch = realFetch;
   }
 });
+
+test("ECS pass-through keeps the client's CD bit, DO bit and class", async () => {
+  _resetMemo();
+  const realFetch = globalThis.fetch;
+  let seen = null;
+  globalThis.fetch = async (_url, init) => {
+    seen = new Uint8Array(init.body);
+    const head = Array.from(seen.subarray(0, 12));
+    head[2] = 0x81; head[3] = 0x80; head[6] = 0; head[7] = 0; head[10] = 0; head[11] = 0;
+    let end = 12;
+    while (seen[end] !== 0) end += seen[end] + 1;
+    return new Response(new Uint8Array([...head, ...seen.subarray(12, end + 5)]), { headers: { "content-type": "application/dns-message" } });
+  };
+  try {
+    // Client query: id 0x1234, RD + CD, www.example.org TXT/IN, OPT with DO set.
+    const name = enc("www.example.org");
+    const query = new Uint8Array([0x12, 0x34, 0x01, 0x10, 0, 1, 0, 0, 0, 0, 0, 1, ...name, 0, 16, 0, 1,
+      0, 0, 41, 0x10, 0x00, 0, 0, 0x80, 0, 0, 0]);
+    const env = { CACHE: "off", ECS: "on" };
+    const req = new Request("https://doh.example.com/dns-query", {
+      method: "POST", body: query, headers: { "content-type": "application/dns-message", "cf-connecting-ip": "203.0.113.7" },
+    });
+    await handle(req, env, {});
+    const m = parseMessage(seen);
+    assert.equal(m.flags & 0x0010, 0x0010, "CD kept");
+    const opt = m.additional.find((r) => r.type === 41);
+    assert.ok(opt, "OPT present");
+    assert.equal(opt.ttl & 0x8000, 0x8000, "DO kept");
+    assert.ok(opt.rdata.length > 0, "ECS option present");
+    assert.equal(m.questions[0].class, 1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
